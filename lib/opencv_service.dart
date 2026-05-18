@@ -50,54 +50,33 @@ class OpenCvService {
 
       final int resizedH = (imageH * resizeScale).toInt();
 
-      final resized = cv.resize(
-        mat,
-        (targetWidth, resizedH),
-      );
+      final resized = cv.resize(mat, (targetWidth, resizedH));
 
       // =========================================================
       // 2. GRAYSCALE
       // =========================================================
 
-      final gray = cv.cvtColor(
-        resized,
-        cv.COLOR_BGR2GRAY,
-      );
+      final gray = cv.cvtColor(resized, cv.COLOR_BGR2GRAY);
 
       // =========================================================
       // 3. REMOVE NOISE
       // =========================================================
 
-      final blurred = cv.gaussianBlur(
-        gray,
-        (5, 5),
-        0,
-      );
+      final blurred = cv.gaussianBlur(gray, (5, 5), 0);
 
       // =========================================================
       // 4. EDGE DETECTION
       // =========================================================
 
-      final edges = cv.canny(
-        blurred,
-        80,
-        180,
-      );
+      final edges = cv.canny(blurred, 80, 180);
 
       // =========================================================
       // 5. CLOSE GAPS
       // =========================================================
 
-      final kernel = cv.getStructuringElement(
-        cv.MORPH_RECT,
-        (5, 5),
-      );
+      final kernel = cv.getStructuringElement(cv.MORPH_RECT, (5, 5));
 
-      final closed = cv.morphologyEx(
-        edges,
-        cv.MORPH_CLOSE,
-        kernel,
-      );
+      final closed = cv.morphologyEx(edges, cv.MORPH_CLOSE, kernel);
 
       // =========================================================
       // 6. FIND CONTOURS
@@ -121,20 +100,13 @@ class OpenCvService {
         final double area = cv.contourArea(contour);
 
         // Ignore tiny objects
-        if (area < (targetWidth * resizedH * 0.08)) {
+        if (area < (targetWidth * resizedH * 0.02)) {
           continue;
         }
 
-        final double perimeter = cv.arcLength(
-          contour,
-          true,
-        );
+        final double perimeter = cv.arcLength(contour, true);
 
-        final approx = cv.approxPolyDP(
-          contour,
-          0.02 * perimeter,
-          true,
-        );
+        final approx = cv.approxPolyDP(contour, 0.02 * perimeter, true);
 
         // Must be rectangle
         if (approx.length != 4) {
@@ -150,9 +122,10 @@ class OpenCvService {
         final rect = cv.boundingRect(approx);
 
         final ratio = rect.width / rect.height;
+        final normalizedRatio = ratio > 1.0 ? ratio : 1.0 / ratio;
 
-        // Trading card / ID card ratios
-        if (ratio < 0.45 || ratio > 0.85) {
+        // Allow portrait and landscape card shapes
+        if (normalizedRatio < 1.2 || normalizedRatio > 2.5) {
           continue;
         }
 
@@ -179,12 +152,7 @@ class OpenCvService {
       for (int i = 0; i < 4; i++) {
         final p = bestContour[i];
 
-        corners.add(
-          Offset(
-            p.x / targetWidth,
-            p.y / resizedH,
-          ),
-        );
+        corners.add(Offset(p.x / targetWidth, p.y / resizedH));
       }
 
       final sortedCorners = _sortCorners(corners);
@@ -212,14 +180,11 @@ class OpenCvService {
   // =============================================================
 
   Uint8List? getWarpedCard(
-      Uint8List imageBytes,
-      List<Offset> normalizedCorners,
-      ) {
+    Uint8List imageBytes,
+    List<Offset> normalizedCorners,
+  ) {
     try {
-      final mat = cv.imdecode(
-        imageBytes,
-        cv.IMREAD_COLOR,
-      );
+      final mat = cv.imdecode(imageBytes, cv.IMREAD_COLOR);
 
       if (mat.isEmpty) {
         return null;
@@ -255,31 +220,18 @@ class OpenCvService {
       final dst = cv.VecPoint2f.fromList([
         cv.Point2f(0, 0),
         cv.Point2f(outputWidth.toDouble(), 0),
-        cv.Point2f(
-          outputWidth.toDouble(),
-          outputHeight.toDouble(),
-        ),
-        cv.Point2f(
-          0,
-          outputHeight.toDouble(),
-        ),
+        cv.Point2f(outputWidth.toDouble(), outputHeight.toDouble()),
+        cv.Point2f(0, outputHeight.toDouble()),
       ]);
 
-      final transform = cv.getPerspectiveTransform2f(
-        src,
-        dst,
-      );
+      final transform = cv.getPerspectiveTransform2f(src, dst);
 
-      final warped = cv.warpPerspective(
-        mat,
-        transform,
-        (outputWidth, outputHeight),
-      );
+      final warped = cv.warpPerspective(mat, transform, (
+        outputWidth,
+        outputHeight,
+      ));
 
-      final (_, encoded) = cv.imencode(
-        ".jpg",
-        warped,
-      );
+      final (_, encoded) = cv.imencode(".jpg", warped);
 
       return encoded;
     } catch (e) {
@@ -301,11 +253,7 @@ class OpenCvService {
     final List<Offset> sorted = List.from(points);
 
     // Top-left = smallest sum
-    sorted.sort(
-          (a, b) => (a.dx + a.dy).compareTo(
-        b.dx + b.dy,
-      ),
-    );
+    sorted.sort((a, b) => (a.dx + a.dy).compareTo(b.dx + b.dy));
 
     final topLeft = sorted.first;
     final bottomRight = sorted.last;
@@ -324,12 +272,7 @@ class OpenCvService {
       bottomLeft = remaining[0];
     }
 
-    return [
-      topLeft,
-      topRight,
-      bottomRight,
-      bottomLeft,
-    ];
+    return [topLeft, topRight, bottomRight, bottomLeft];
   }
 
   // =============================================================

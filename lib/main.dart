@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'card_scanner_screen.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
   runApp(const MyApp());
 }
 
