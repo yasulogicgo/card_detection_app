@@ -110,7 +110,6 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
     }
 
     // Performance Optimization: Process detection only ~5 times per second
-    // This keeps the camera preview running at high FPS
     final now = DateTime.now().millisecondsSinceEpoch;
     if (_lastProcessTime != null && now - _lastProcessTime! < 200) {
       return;
@@ -226,11 +225,7 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
     });
 
     try {
-      // Taking a picture without stopping the stream first is often faster on Android
       final XFile file = await _cameraController!.takePicture();
-
-      // Stop the stream AFTER taking the picture to keep the preview alive as long as possible
-      // or just keep it stopped during the confirmation phase.
       await _cameraController!.stopImageStream();
 
       if (!mounted) return;
@@ -245,7 +240,7 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
           ),
         ),
       );
-      
+
       if (mounted) {
         _resumeStream();
       }
@@ -420,131 +415,220 @@ class ConfirmationScreen extends StatefulWidget {
   State<ConfirmationScreen> createState() => _ConfirmationScreenState();
 }
 
+class _CropResult {
+  final File file;
+  final Size croppedSize;
+  final Rect sourcePixelCropRect;
+
+  const _CropResult({
+    required this.file,
+    required this.croppedSize,
+    required this.sourcePixelCropRect,
+  });
+}
+
 class _ConfirmationScreenState extends State<ConfirmationScreen> {
   bool _isUploading = false;
   String? _croppedPath;
+  Rect? _detectedRectOriginal;
+  Rect? _firstCropRect;
+  Rect? _guideOuterRect;
+  Rect? _guideInnerRect;
+  Size? _previewCoordinateSize;
+  bool _isFirstCropApplied = false;
 
-  Future<void> _onCropPressed() async {
-    if (widget.detectedRect == null || widget.streamSize == null) return;
+  static const double _innerPadding = 20.0;
+  static const double _defaultPadding = 60.0; // Increased padding for easier settlement
+  static const double _minGap = 12.0;
 
-    setState(() {
-      _isUploading = true;
-    });
+  @override
+  void initState() {
+    super.initState();
+    _initializePreviewState();
+  }
+
+  void _initializePreviewState() {
+    final streamSize = widget.streamSize;
+    final detectedRect = widget.detectedRect;
+    if (streamSize == null || detectedRect == null) return;
+
+    final normalizedDetected = Rect.fromLTRB(
+      detectedRect.left.clamp(0.0, streamSize.width).toDouble(),
+      detectedRect.top.clamp(0.0, streamSize.height).toDouble(),
+      detectedRect.right.clamp(0.0, streamSize.width).toDouble(),
+      detectedRect.bottom.clamp(0.0, streamSize.height).toDouble(),
+    );
+
+    _detectedRectOriginal = normalizedDetected;
+    _previewCoordinateSize = streamSize;
+  }
+
+  Future<_CropResult?> _cropRectFromImage({
+    required String sourcePath,
+    required Rect cropRect,
+    required Size coordinateSpace,
+    required bool updatePreview,
+  }) async {
+
+    if (mounted) setState(() => _isUploading = true);
 
     try {
-      final bytes = await File(widget.imagePath).readAsBytes();
-      final original = img.decodeImage(bytes);
-      if (original == null) return;
+      final bytes = await File(sourcePath).readAsBytes();
+      final decoded = img.decodeImage(bytes);
+      if (decoded == null) return null;
+      final original = img.bakeOrientation(decoded);
 
-      final rect = widget.detectedRect!;
-      final streamSize = widget.streamSize!;
+      final scaleX = original.width / coordinateSpace.width;
+      final scaleY = original.height / coordinateSpace.height;
 
-      // Calculate Scaling factors (Photo vs Stream)
-      final scaleX = original.width / streamSize.width;
-      final scaleY = original.height / streamSize.height;
-
-      final cropX = (rect.left * scaleX).toInt().clamp(0, original.width);
-      final cropY = (rect.top * scaleY).toInt().clamp(0, original.height);
-      final cropW = (rect.width * scaleX).toInt().clamp(1, original.width - cropX);
-      final cropH = (rect.height * scaleY).toInt().clamp(1, original.height - cropY);
+      final cropX = (cropRect.left * scaleX).round().clamp(0, original.width - 1);
+      final cropY = (cropRect.top * scaleY).round().clamp(0, original.height - 1);
+      final cropRight = (cropRect.right * scaleX).round().clamp(cropX + 1, original.width);
+      final cropBottom = (cropRect.bottom * scaleY).round().clamp(cropY + 1, original.height);
+      final cropW = math.max(1, cropRight - cropX);
+      final cropH = math.max(1, cropBottom - cropY);
 
       final cropped = img.copyCrop(original, x: cropX, y: cropY, width: cropW, height: cropH);
-      
+
       final directory = await getTemporaryDirectory();
       final path = '${directory.path}/crop_${DateTime.now().millisecondsSinceEpoch}.jpg';
       final croppedFile = File(path);
       await croppedFile.writeAsBytes(img.encodeJpg(cropped));
 
-      setState(() {
-        _croppedPath = path;
-      });
+      if (updatePreview && mounted) {
+        setState(() {
+          _croppedPath = path;
+        });
+      }
+      return _CropResult(
+        file: croppedFile,
+        croppedSize: Size(cropW.toDouble(), cropH.toDouble()),
+        sourcePixelCropRect: Rect.fromLTWH(cropX.toDouble(), cropY.toDouble(), cropW.toDouble(), cropH.toDouble()),
+      );
     } catch (e) {
       debugPrint("Crop error: $e");
+      return null;
     } finally {
-      setState(() {
-        _isUploading = false;
-      });
+      if (mounted) setState(() => _isUploading = false);
     }
   }
 
   Future<void> _onCheckPressed() async {
-    setState(() {
-      _isUploading = true;
-    });
+    setState(() => _isUploading = true);
 
     try {
-      final imageToUpload = File(_croppedPath ?? widget.imagePath);
-      final response = await _uploadImage(imageToUpload);
+      File imageToUpload;
+      
+      if (_isFirstCropApplied && _guideOuterRect != null && _previewCoordinateSize != null) {
+        // PERFORM FINAL PRECISION CROP based on Outer Guide
+        final finalCrop = await _cropRectFromImage(
+          sourcePath: _croppedPath ?? widget.imagePath,
+          cropRect: _guideOuterRect!,
+          coordinateSpace: _previewCoordinateSize!,
+          updatePreview: false,
+        );
+        if (finalCrop == null) return;
+        imageToUpload = finalCrop.file;
+      } else {
+        // Fallback to current available image
+        imageToUpload = File(_croppedPath ?? widget.imagePath);
+      }
 
+      final response = await _uploadImage(imageToUpload);
       if (!mounted) return;
 
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(
-          builder: (_) => ResultScreen(
-            imagePath: widget.imagePath,
-            apiResponse: response,
-          ),
-        ),
+        MaterialPageRoute(builder: (_) => ResultScreen(imagePath: imageToUpload.path, apiResponse: response)),
       );
     } catch (e) {
       debugPrint("API Error: $e");
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Error: $e")),
-        );
-      }
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Error: $e")));
     } finally {
-      if (mounted) {
-        setState(() {
-          _isUploading = false;
-        });
-      }
+      if (mounted) setState(() => _isUploading = false);
     }
   }
 
   Future<Map<String, dynamic>> _uploadImage(File imageFile) async {
     var request = http.MultipartRequest('POST', Uri.parse(kApiEndpoint));
-    request.files.add(await http.MultipartFile.fromPath(
-      'file',
-      imageFile.path,
-      contentType: MediaType('image', 'jpeg'),
-    ));
+    request.files.add(await http.MultipartFile.fromPath('file', imageFile.path, contentType: MediaType('image', 'jpeg')));
+    var response = await http.Response.fromStream(await request.send());
+    if (response.statusCode == 200) return json.decode(response.body);
+    return {"success": false, "message": "Server error: ${response.statusCode}"};
+  }
 
-    var streamedResponse = await request.send();
-    var response = await http.Response.fromStream(streamedResponse);
+  Future<void> _handleFirstCrop() async {
+    final detectedRect = _detectedRectOriginal;
+    final previewCoordinateSize = _previewCoordinateSize;
+    if (_isFirstCropApplied || detectedRect == null || previewCoordinateSize == null) return;
 
-    debugPrint("API Status Code: ${response.statusCode}");
-    debugPrint("API Response Body: ${response.body}");
+    final firstCropRect = Rect.fromLTRB(
+      math.max(0, detectedRect.left - _defaultPadding),
+      math.max(0, detectedRect.top - _defaultPadding),
+      math.min(previewCoordinateSize.width, detectedRect.right + _defaultPadding),
+      math.min(previewCoordinateSize.height, detectedRect.bottom + _defaultPadding),
+    );
 
-    if (response.statusCode == 200) {
-      return json.decode(response.body);
-    } else {
-      return {
-        "success": false,
-        "message": "Server error: ${response.statusCode}",
-      };
-    }
+    final cropped = await _cropRectFromImage(
+      sourcePath: widget.imagePath,
+      cropRect: firstCropRect,
+      coordinateSpace: previewCoordinateSize,
+      updatePreview: true,
+    );
+    if (cropped == null || !mounted) return;
+
+    final sourceImage = await _getImageSize(File(widget.imagePath));
+    final sourceScaleX = sourceImage.width / previewCoordinateSize.width;
+    final sourceScaleY = sourceImage.height / previewCoordinateSize.height;
+
+    final detectedPixelRect = Rect.fromLTRB(
+      detectedRect.left * sourceScaleX,
+      detectedRect.top * sourceScaleY,
+      detectedRect.right * sourceScaleX,
+      detectedRect.bottom * sourceScaleY,
+    );
+
+    final cropPixelRect = cropped.sourcePixelCropRect;
+    final mappedOuterGuide = Rect.fromLTRB(
+      detectedPixelRect.left - cropPixelRect.left,
+      detectedPixelRect.top - cropPixelRect.top,
+      detectedPixelRect.right - cropPixelRect.left,
+      detectedPixelRect.bottom - cropPixelRect.top,
+    );
+    final mappedInnerGuide = Rect.fromLTRB(
+      (mappedOuterGuide.left + _innerPadding).clamp(0.0, mappedOuterGuide.right - _minGap),
+      (mappedOuterGuide.top + _innerPadding).clamp(0.0, mappedOuterGuide.bottom - _minGap),
+      (mappedOuterGuide.right - _innerPadding).clamp(mappedOuterGuide.left + _minGap, cropped.croppedSize.width),
+      (mappedOuterGuide.bottom - _innerPadding).clamp(mappedOuterGuide.top + _minGap, cropped.croppedSize.height),
+    );
+
+    setState(() {
+      _isFirstCropApplied = true;
+      _firstCropRect = firstCropRect;
+      _previewCoordinateSize = cropped.croppedSize;
+      _guideOuterRect = mappedOuterGuide;
+      _guideInnerRect = mappedInnerGuide;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
-      appBar: AppBar(
-        title: const Text("Confirm Image"),
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-      ),
+      appBar: AppBar(title: const Text("Preview"), backgroundColor: Colors.transparent, elevation: 0),
       body: Column(
         children: [
           Expanded(
             child: Stack(
               children: [
                 Center(
-                  child: Image.file(File(_croppedPath ?? widget.imagePath), key: ValueKey(_croppedPath)),
+                  child: Image.file(
+                    File(_croppedPath ?? widget.imagePath),
+                    key: ValueKey(_croppedPath),
+                    fit: BoxFit.contain,
+                  ),
                 ),
-                if (_croppedPath == null && widget.detectedRect != null && widget.streamSize != null)
+                if (!_isFirstCropApplied && _detectedRectOriginal != null && _previewCoordinateSize != null)
                   Positioned.fill(
                     child: LayoutBuilder(
                       builder: (context, constraints) {
@@ -552,39 +636,29 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                           future: _getImageSize(File(widget.imagePath)),
                           builder: (context, snapshot) {
                             if (!snapshot.hasData) return Container();
-                            final imageSize = snapshot.data!;
-
-                            final rect = widget.detectedRect!;
-
-                            // Image displayed size
-                            final displayedWidth = constraints.maxWidth;
-                            final displayedHeight = displayedWidth * (imageSize.height / imageSize.width);
-
-                            // Center offset
-                            final offsetY = (constraints.maxHeight - displayedHeight) / 2;
-
-                            // Scale factors
-                            final scaleX = displayedWidth / widget.streamSize!.width;
-                            final scaleY = displayedHeight / widget.streamSize!.height;
-
-                            // Rectangle corners
-                            final left = rect.left * scaleX;
-                            final top = rect.top * scaleY + offsetY;
-                            final right = rect.right * scaleX;
-                            final bottom = rect.bottom * scaleY + offsetY;
-
-                            final points = [
-                              Offset(left, top), // TL
-                              Offset(right, top), // TR
-                              Offset(right, bottom), // BR
-                              Offset(left, bottom), // BL
-                            ];
-
-                            return GestureDetector(
-                              onTap: _onCropPressed,
-                              child: CustomPaint(
-                                painter: SimplePolygonPainter(points: points),
-                              ),
+                            final displayRect = _getDisplayedImageRect(containerSize: Size(constraints.maxWidth, constraints.maxHeight), imageSize: snapshot.data!);
+                            return CropEditorOverlay(imageBounds: displayRect, streamSize: _previewCoordinateSize!, detectedRect: _detectedRectOriginal!, onBackgroundTap: _handleFirstCrop);
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                if (_isFirstCropApplied && _croppedPath != null && _guideOuterRect != null && _guideInnerRect != null && _previewCoordinateSize != null)
+                  Positioned.fill(
+                    child: LayoutBuilder(
+                      builder: (context, constraints) {
+                        return FutureBuilder<Size>(
+                          future: _getImageSize(File(_croppedPath!)),
+                          builder: (context, snapshot) {
+                            if (!snapshot.hasData) return Container();
+                            final displayRect = _getDisplayedImageRect(containerSize: Size(constraints.maxWidth, constraints.maxHeight), imageSize: snapshot.data!);
+                            return SecondStageCropOverlay(
+                              imageBounds: displayRect,
+                              streamSize: _previewCoordinateSize!,
+                              outerGuideRect: _guideOuterRect!,
+                              innerGuideRect: _guideInnerRect!,
+                              onOuterChanged: (rect) => setState(() => _guideOuterRect = rect),
+                              onInnerChanged: (rect) => setState(() => _guideInnerRect = rect),
                             );
                           },
                         );
@@ -596,99 +670,220 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
           ),
           Container(
             padding: const EdgeInsets.all(24.0),
-            decoration: const BoxDecoration(
-              color: Colors.black87,
-              borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-            ),
+            decoration: const BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
             child: _isUploading
                 ? const Center(child: CircularProgressIndicator())
                 : Row(
                     children: [
-                      Expanded(
-                        child: OutlinedButton(
-                          onPressed: () => Navigator.pop(context),
-                          style: OutlinedButton.styleFrom(
-                            minimumSize: const Size(0, 50),
-                            side: const BorderSide(color: Colors.white, width: 2),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                          ),
-                          child: const Text("Retake", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                        ),
-                      ),
-                      if (_croppedPath == null && widget.detectedRect != null) ...[
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: ElevatedButton(
-                            onPressed: _onCropPressed,
-                            style: ElevatedButton.styleFrom(
-                              minimumSize: const Size(0, 50),
-                              backgroundColor: Colors.blueAccent,
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                            ),
-                            child: const Text("Crop", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                          ),
-                        ),
-                      ],
-                      const SizedBox(width: 16),
-                      Expanded(
-                        child: ElevatedButton(
-                          onPressed: _onCheckPressed,
-                          style: ElevatedButton.styleFrom(
-                            minimumSize: const Size(0, 50),
-                            backgroundColor: Colors.white,
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                          ),
-                          child: const Text("Check", style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
-                        ),
-                      ),
+                      Expanded(child: OutlinedButton(onPressed: () => Navigator.pop(context), style: OutlinedButton.styleFrom(minimumSize: const Size(0, 50), side: const BorderSide(color: Colors.white, width: 2), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))), child: const Text("Retake", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)))),
+                      const SizedBox(width: 8),
+                      Expanded(child: ElevatedButton(onPressed: _handleFirstCrop, style: ElevatedButton.styleFrom(minimumSize: const Size(0, 50), backgroundColor: const Color(0xFF4A80F0), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))), child: const Text("Crop", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)))),
+                      const SizedBox(width: 8),
+                      Expanded(child: ElevatedButton(onPressed: _onCheckPressed, style: ElevatedButton.styleFrom(minimumSize: const Size(0, 50), backgroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))), child: const Text("Check", style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)))),
                     ],
                   ),
           ),
+          if (_isFirstCropApplied && _croppedPath != null && _guideOuterRect != null && _guideInnerRect != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: Row(
+                children: [
+                  Expanded(child: _buildMetricCard("Main +20", _formatSplitValue(_guideInnerRect!.left - _guideOuterRect!.left, _guideOuterRect!.right - _guideInnerRect!.right))),
+                  const SizedBox(width: 12),
+                  Expanded(child: _buildMetricCard("Outer +40", _formatSplitValue(_guideInnerRect!.top - _guideOuterRect!.top, _guideOuterRect!.bottom - _guideInnerRect!.bottom))),
+                ],
+              ),
+            ),
         ],
       ),
     );
   }
 
+  Rect _getDisplayedImageRect({required Size containerSize, required Size imageSize}) {
+    final scale = math.min(containerSize.width / imageSize.width, containerSize.height / imageSize.height);
+    final width = imageSize.width * scale;
+    final height = imageSize.height * scale;
+    return Rect.fromLTWH((containerSize.width - width) / 2, (containerSize.height - height) / 2, width, height);
+  }
+
+  Widget _buildMetricCard(String title, String value) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+      decoration: BoxDecoration(color: const Color(0xFF161616), borderRadius: BorderRadius.circular(18)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(title, style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
+        const SizedBox(height: 8),
+        Text(value, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700)),
+      ]),
+    );
+  }
+
+  String _formatSplitValue(double first, double second) {
+    final total = first + second;
+    if (total <= 0) return "50.0/50.0";
+    final firstPercent = (first / total) * 100;
+    final secondPercent = (second / total) * 100;
+    return "${firstPercent.toStringAsFixed(1)}/${secondPercent.toStringAsFixed(1)}";
+  }
+
   Future<Size> _getImageSize(File file) async {
     final bytes = await file.readAsBytes();
-    final image = img.decodeImage(bytes);
-    if (image == null) return const Size(0, 0);
-    return Size(image.width.toDouble(), image.height.toDouble());
+    final decoded = img.decodeImage(bytes);
+    final image = decoded == null ? null : img.bakeOrientation(decoded);
+    return image == null ? const Size(0, 0) : Size(image.width.toDouble(), image.height.toDouble());
   }
 }
 
-class SimplePolygonPainter extends CustomPainter {
-  final List<Offset> points;
+class CropEditorOverlay extends StatelessWidget {
+  final Rect imageBounds;
+  final Size streamSize;
+  final Rect detectedRect;
+  final VoidCallback onBackgroundTap;
+  const CropEditorOverlay({super.key, required this.imageBounds, required this.streamSize, required this.detectedRect, required this.onBackgroundTap});
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(behavior: HitTestBehavior.translucent, onTap: onBackgroundTap, child: CustomPaint(painter: CropOverlayPainter(imageBounds: imageBounds, streamSize: streamSize, detectedRect: detectedRect)));
+  }
+}
 
-  SimplePolygonPainter({required this.points});
-
+class CropOverlayPainter extends CustomPainter {
+  final Rect imageBounds;
+  final Size streamSize;
+  final Rect detectedRect;
+  const CropOverlayPainter({required this.imageBounds, required this.streamSize, required this.detectedRect});
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.greenAccent
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 3.0
-      ..strokeCap = StrokeCap.round;
+    final scaleX = imageBounds.width / streamSize.width;
+    final scaleY = imageBounds.height / streamSize.height;
+    final displayRect = Rect.fromLTRB(imageBounds.left + (detectedRect.left * scaleX), imageBounds.top + (detectedRect.top * scaleY), imageBounds.left + (detectedRect.right * scaleX), imageBounds.top + (detectedRect.bottom * scaleY));
+    canvas.drawRect(displayRect, Paint()..color = Colors.deepPurpleAccent..style = PaintingStyle.stroke..strokeWidth = 3);
+  }
+  @override
+  bool shouldRepaint(covariant CropOverlayPainter oldDelegate) => true;
+}
 
-    if (points.length < 4) return;
+class SecondStageCropOverlay extends StatelessWidget {
+  final Rect imageBounds;
+  final Size streamSize;
+  final Rect outerGuideRect;
+  final Rect innerGuideRect;
+  final ValueChanged<Rect> onOuterChanged;
+  final ValueChanged<Rect> onInnerChanged;
 
-    final path = Path()
-      ..moveTo(points[0].dx, points[0].dy)
-      ..lineTo(points[1].dx, points[1].dy)
-      ..lineTo(points[2].dx, points[2].dy)
-      ..lineTo(points[3].dx, points[3].dy)
-      ..close();
+  const SecondStageCropOverlay({super.key, required this.imageBounds, required this.streamSize, required this.outerGuideRect, required this.innerGuideRect, required this.onOuterChanged, required this.onInnerChanged});
 
-    canvas.drawPath(path, paint);
-
-    final dotPaint = Paint()..color = Colors.greenAccent;
-    for (var point in points) {
-      canvas.drawCircle(point, 6, dotPaint);
-    }
+  Offset _toDisplayPoint(Offset point) {
+    final scaleX = imageBounds.width / streamSize.width;
+    final scaleY = imageBounds.height / streamSize.height;
+    return Offset(imageBounds.left + (point.dx * scaleX), imageBounds.top + (point.dy * scaleY));
   }
 
+  double _deltaToStreamX(double delta) => delta * streamSize.width / imageBounds.width;
+  double _deltaToStreamY(double delta) => delta * streamSize.height / imageBounds.height;
+
   @override
-  bool shouldRepaint(covariant SimplePolygonPainter oldDelegate) => true;
+  Widget build(BuildContext context) {
+    return Stack(
+      children: [
+        Positioned.fill(child: CustomPaint(painter: ZoomCropOverlayPainter(croppedSize: streamSize, outerGuideRect: outerGuideRect, innerGuideRect: innerGuideRect))),
+        _buildHandle(
+          point: _toDisplayPoint(Offset((outerGuideRect.left + outerGuideRect.right) / 2, outerGuideRect.top)),
+          icon: Icons.keyboard_arrow_up,
+          color: Colors.deepPurpleAccent,
+          onDrag: (details) {
+            final nextTop = (outerGuideRect.top + _deltaToStreamY(details.delta.dy)).clamp(0.0, innerGuideRect.top - _ConfirmationScreenState._minGap);
+            onOuterChanged(Rect.fromLTRB(outerGuideRect.left, nextTop, outerGuideRect.right, outerGuideRect.bottom));
+          },
+        ),
+        _buildHandle(
+          point: _toDisplayPoint(Offset((outerGuideRect.left + outerGuideRect.right) / 2, outerGuideRect.bottom)),
+          icon: Icons.keyboard_arrow_down,
+          color: Colors.deepPurpleAccent,
+          onDrag: (details) {
+            final nextBottom = (outerGuideRect.bottom + _deltaToStreamY(details.delta.dy)).clamp(innerGuideRect.bottom + _ConfirmationScreenState._minGap, streamSize.height);
+            onOuterChanged(Rect.fromLTRB(outerGuideRect.left, outerGuideRect.top, outerGuideRect.right, nextBottom));
+          },
+        ),
+        _buildHandle(
+          point: _toDisplayPoint(Offset(outerGuideRect.left, (outerGuideRect.top + outerGuideRect.bottom) / 2)),
+          icon: Icons.keyboard_arrow_left,
+          color: Colors.deepPurpleAccent,
+          onDrag: (details) {
+            final nextLeft = (outerGuideRect.left + _deltaToStreamX(details.delta.dx)).clamp(0.0, innerGuideRect.left - _ConfirmationScreenState._minGap);
+            onOuterChanged(Rect.fromLTRB(nextLeft, outerGuideRect.top, outerGuideRect.right, outerGuideRect.bottom));
+          },
+        ),
+        _buildHandle(
+          point: _toDisplayPoint(Offset(outerGuideRect.right, (outerGuideRect.top + outerGuideRect.bottom) / 2)),
+          icon: Icons.keyboard_arrow_right,
+          color: Colors.deepPurpleAccent,
+          onDrag: (details) {
+            final nextRight = (outerGuideRect.right + _deltaToStreamX(details.delta.dx)).clamp(innerGuideRect.right + _ConfirmationScreenState._minGap, streamSize.width);
+            onOuterChanged(Rect.fromLTRB(outerGuideRect.left, outerGuideRect.top, nextRight, outerGuideRect.bottom));
+          },
+        ),
+        _buildHandle(
+          point: _toDisplayPoint(Offset((innerGuideRect.left + innerGuideRect.right) / 2, innerGuideRect.top)),
+          icon: Icons.keyboard_arrow_up,
+          color: Colors.green,
+          onDrag: (details) {
+            final nextTop = (innerGuideRect.top + _deltaToStreamY(details.delta.dy)).clamp(outerGuideRect.top + _ConfirmationScreenState._minGap, innerGuideRect.bottom - _ConfirmationScreenState._minGap);
+            onInnerChanged(Rect.fromLTRB(innerGuideRect.left, nextTop, innerGuideRect.right, innerGuideRect.bottom));
+          },
+        ),
+        _buildHandle(
+          point: _toDisplayPoint(Offset((innerGuideRect.left + innerGuideRect.right) / 2, innerGuideRect.bottom)),
+          icon: Icons.keyboard_arrow_down,
+          color: Colors.green,
+          onDrag: (details) {
+            final nextBottom = (innerGuideRect.bottom + _deltaToStreamY(details.delta.dy)).clamp(innerGuideRect.top + _ConfirmationScreenState._minGap, outerGuideRect.bottom - _ConfirmationScreenState._minGap);
+            onInnerChanged(Rect.fromLTRB(innerGuideRect.left, innerGuideRect.top, innerGuideRect.right, nextBottom));
+          },
+        ),
+        _buildHandle(
+          point: _toDisplayPoint(Offset(innerGuideRect.left, (innerGuideRect.top + innerGuideRect.bottom) / 2)),
+          icon: Icons.keyboard_arrow_left,
+          color: Colors.green,
+          onDrag: (details) {
+            final nextLeft = (innerGuideRect.left + _deltaToStreamX(details.delta.dx)).clamp(outerGuideRect.left + _ConfirmationScreenState._minGap, innerGuideRect.right - _ConfirmationScreenState._minGap);
+            onInnerChanged(Rect.fromLTRB(nextLeft, innerGuideRect.top, innerGuideRect.right, innerGuideRect.bottom));
+          },
+        ),
+        _buildHandle(
+          point: _toDisplayPoint(Offset(innerGuideRect.right, (innerGuideRect.top + innerGuideRect.bottom) / 2)),
+          icon: Icons.keyboard_arrow_right,
+          color: Colors.green,
+          onDrag: (details) {
+            final nextRight = (innerGuideRect.right + _deltaToStreamX(details.delta.dx)).clamp(innerGuideRect.left + _ConfirmationScreenState._minGap, outerGuideRect.right - _ConfirmationScreenState._minGap);
+            onInnerChanged(Rect.fromLTRB(innerGuideRect.left, innerGuideRect.top, nextRight, innerGuideRect.bottom));
+          },
+        ),
+      ],
+    );
+  }
+
+  Widget _buildHandle({required Offset point, required IconData icon, required Color color, required GestureDragUpdateCallback onDrag}) {
+    return Positioned(left: point.dx - 28, top: point.dy - 28, child: GestureDetector(onPanUpdate: onDrag, child: Container(width: 56, height: 56, decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(10)), child: Icon(icon, color: Colors.white, size: 36))));
+  }
+}
+
+class ZoomCropOverlayPainter extends CustomPainter {
+  final Size croppedSize;
+  final Rect outerGuideRect;
+  final Rect innerGuideRect;
+  const ZoomCropOverlayPainter({required this.croppedSize, required this.outerGuideRect, required this.innerGuideRect});
+  Rect _scaleRect(Rect rect, Size size) {
+    final scaleX = size.width / croppedSize.width;
+    final scaleY = size.height / croppedSize.height;
+    return Rect.fromLTRB(rect.left * scaleX, rect.top * scaleY, rect.right * scaleX, rect.bottom * scaleY);
+  }
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawRect(_scaleRect(outerGuideRect, size), Paint()..color = Colors.deepPurpleAccent..style = PaintingStyle.stroke..strokeWidth = 2);
+    canvas.drawRect(_scaleRect(innerGuideRect, size), Paint()..color = Colors.green..style = PaintingStyle.stroke..strokeWidth = 2);
+  }
+  @override
+  bool shouldRepaint(covariant ZoomCropOverlayPainter oldDelegate) => true;
 }
 
 class ObjectDetectorPainter extends CustomPainter {
@@ -696,152 +891,57 @@ class ObjectDetectorPainter extends CustomPainter {
   final Size imageSize;
   final InputImageRotation rotation;
   final CameraLensDirection lensDirection;
-
-  ObjectDetectorPainter(
-    this.objects,
-    this.imageSize,
-    this.rotation,
-    this.lensDirection,
-  );
-
+  ObjectDetectorPainter(this.objects, this.imageSize, this.rotation, this.lensDirection);
   @override
   void paint(Canvas canvas, Size size) {
-    final Paint paintCorners = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 5.0
-      ..color = Colors.greenAccent
-      ..strokeCap = StrokeCap.round;
-
-    final Paint paintFill = Paint()
-      ..style = PaintingStyle.fill
-      ..color = Colors.greenAccent.withOpacity(0.1);
-
+    final Paint paintCorners = Paint()..style = PaintingStyle.stroke..strokeWidth = 5.0..color = Colors.greenAccent..strokeCap = StrokeCap.round;
+    final Paint paintFill = Paint()..style = PaintingStyle.fill..color = Colors.greenAccent.withOpacity(0.1);
     for (final object in objects) {
-      final rect = _translateRect(
-        object.boundingBox,
-        imageSize,
-        size,
-        rotation,
-        lensDirection,
-      );
-
+      final rect = _translateRect(object.boundingBox, imageSize, size, rotation, lensDirection);
       canvas.drawRRect(RRect.fromRectAndRadius(rect, const Radius.circular(8)), paintFill);
-
-      const double cornerSize = 25.0;
-      final path = Path()
-        ..moveTo(rect.left, rect.top + cornerSize)
-        ..lineTo(rect.left, rect.top)
-        ..lineTo(rect.left + cornerSize, rect.top)
-        ..moveTo(rect.right - cornerSize, rect.top)
-        ..lineTo(rect.right, rect.top)
-        ..lineTo(rect.right, rect.top + cornerSize)
-        ..moveTo(rect.right, rect.bottom - cornerSize)
-        ..lineTo(rect.right, rect.bottom)
-        ..lineTo(rect.right - cornerSize, rect.bottom)
-        ..moveTo(rect.left + cornerSize, rect.bottom)
-        ..lineTo(rect.left, rect.bottom)
-        ..lineTo(rect.left, rect.bottom - cornerSize);
-
+      const double cs = 25.0;
+      final path = Path()..moveTo(rect.left, rect.top + cs)..lineTo(rect.left, rect.top)..lineTo(rect.left + cs, rect.top)..moveTo(rect.right - cs, rect.top)..lineTo(rect.right, rect.top)..lineTo(rect.right, rect.top + cs)..moveTo(rect.right, rect.bottom - cs)..lineTo(rect.right, rect.bottom)..lineTo(rect.right - cs, rect.bottom)..moveTo(rect.left + cs, rect.bottom)..lineTo(rect.left, rect.bottom)..lineTo(rect.left, rect.bottom - cs);
       canvas.drawPath(path, paintCorners);
-
-      // Define the 4 corner points based on the translated rect for live feedback
-      final topLeft = Offset(rect.left, rect.top);
-      final topRight = Offset(rect.right, rect.top);
-      final bottomLeft = Offset(rect.left, rect.bottom);
-      final bottomRight = Offset(rect.right, rect.bottom);
-
       final dotPaint = Paint()..color = Colors.greenAccent;
-      canvas.drawCircle(topLeft, 6, dotPaint);
-      canvas.drawCircle(topRight, 6, dotPaint);
-      canvas.drawCircle(bottomLeft, 6, dotPaint);
-      canvas.drawCircle(bottomRight, 6, dotPaint);
+      canvas.drawCircle(rect.topLeft, 6, dotPaint);
+      canvas.drawCircle(rect.topRight, 6, dotPaint);
+      canvas.drawCircle(rect.bottomLeft, 6, dotPaint);
+      canvas.drawCircle(rect.bottomRight, 6, dotPaint);
     }
   }
-
   Rect _translateRect(Rect rect, Size imageSize, Size widgetSize, InputImageRotation rotation, CameraLensDirection lensDirection) {
-    // Standard scaling without axis swap, assuming orientations are now aligned
     final scaleX = widgetSize.width / imageSize.width;
     final scaleY = widgetSize.height / imageSize.height;
-
     double left = rect.left * scaleX;
     double top = rect.top * scaleY;
     double right = rect.right * scaleX;
     double bottom = rect.bottom * scaleY;
-
     if (lensDirection == CameraLensDirection.front) {
       final tempLeft = left;
       left = widgetSize.width - right;
       right = widgetSize.width - tempLeft;
     }
-
     return Rect.fromLTRB(left, top, right, bottom);
   }
-
   @override
-  bool shouldRepaint(ObjectDetectorPainter oldDelegate) {
-    return oldDelegate.objects != objects || oldDelegate.imageSize != imageSize;
-  }
+  bool shouldRepaint(ObjectDetectorPainter oldDelegate) => oldDelegate.objects != objects || oldDelegate.imageSize != imageSize;
 }
 
 class ResultScreen extends StatelessWidget {
   final String imagePath;
   final Map<String, dynamic> apiResponse;
-
-  const ResultScreen({
-    super.key,
-    required this.imagePath,
-    required this.apiResponse,
-  });
-
+  const ResultScreen({super.key, required this.imagePath, required this.apiResponse});
   @override
   Widget build(BuildContext context) {
     final bool success = apiResponse['success'] ?? false;
     final String message = apiResponse['message'] ?? "Unknown error";
-
     return Scaffold(
       backgroundColor: Colors.black,
-      appBar: AppBar(
-        title: Text(success ? 'Card Detected' : 'Detection Failed'),
-        backgroundColor: Colors.transparent,
-      ),
+      appBar: AppBar(title: Text(success ? 'Card Detected' : 'Detection Failed'), backgroundColor: Colors.transparent),
       body: Column(
         children: [
-          Expanded(
-            child: Center(
-              child: success
-                  ? CardResultPreview(
-                      imagePath: imagePath,
-                      apiData: apiResponse['data'],
-                    )
-                  : Padding(
-                      padding: const EdgeInsets.all(20.0),
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Icon(Icons.error_outline, size: 80, color: Colors.red),
-                          const SizedBox(height: 16),
-                          Text(
-                            message,
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
-                          ),
-                        ],
-                      ),
-                    ),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.all(24.0),
-            child: ElevatedButton(
-              onPressed: () => Navigator.pop(context),
-              style: ElevatedButton.styleFrom(
-                minimumSize: const Size(double.infinity, 50),
-                backgroundColor: Colors.white,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              ),
-              child: const Text('Back to Camera', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
-            ),
-          ),
+          Expanded(child: Center(child: success ? CardResultPreview(imagePath: imagePath, apiData: apiResponse['data']) : Padding(padding: const EdgeInsets.all(20.0), child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [const Icon(Icons.error_outline, size: 80, color: Colors.red), const SizedBox(height: 16), Text(message, textAlign: TextAlign.center, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white))])))),
+          Padding(padding: const EdgeInsets.all(24.0), child: ElevatedButton(onPressed: () => Navigator.pop(context), style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 50), backgroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))), child: const Text('Back to Camera', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)))),
         ],
       ),
     );
@@ -851,13 +951,7 @@ class ResultScreen extends StatelessWidget {
 class CardResultPreview extends StatelessWidget {
   final String imagePath;
   final Map<String, dynamic>? apiData;
-
-  const CardResultPreview({
-    super.key,
-    required this.imagePath,
-    this.apiData,
-  });
-
+  const CardResultPreview({super.key, required this.imagePath, this.apiData});
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
@@ -867,15 +961,11 @@ class CardResultPreview extends StatelessWidget {
           builder: (context, snapshot) {
             if (!snapshot.hasData) return const CircularProgressIndicator();
             final imageSize = snapshot.data!;
-
-            // Calculate scale factors
             final scaleX = constraints.maxWidth / imageSize.width;
             final widgetHeight = constraints.maxWidth * (imageSize.height / imageSize.width);
             final scaleY = widgetHeight / imageSize.height;
-
             List<Offset> corners = [];
             if (apiData != null) {
-              // Try to get 4 corners first
               if (apiData!.containsKey('topleft')) {
                 corners = [
                   Offset(apiData!['topleft']['x'].toDouble() * scaleX, apiData!['topleft']['y'].toDouble() * scaleY),
@@ -884,77 +974,39 @@ class CardResultPreview extends StatelessWidget {
                   Offset(apiData!['bottomleft']['x'].toDouble() * scaleX, apiData!['bottomleft']['y'].toDouble() * scaleY),
                 ];
               } else if (apiData!.containsKey('box')) {
-                // Fallback to box
                 final box = apiData!['box'];
                 final left = box['x'].toDouble() * scaleX;
                 final top = box['y'].toDouble() * scaleY;
                 final width = box['width'].toDouble() * scaleX;
                 final height = box['height'].toDouble() * scaleY;
-                corners = [
-                  Offset(left, top),
-                  Offset(left + width, top),
-                  Offset(left + width, top + height),
-                  Offset(left, top + height),
-                ];
+                corners = [Offset(left, top), Offset(left + width, top), Offset(left + width, top + height), Offset(left, top + height)];
               }
             }
-
-            return Stack(
-              children: [
-                Image.file(File(imagePath)),
-                if (corners.isNotEmpty)
-                  Positioned.fill(
-                    child: CustomPaint(
-                      painter: PolygonPainter(points: corners),
-                    ),
-                  ),
-              ],
-            );
+            return Stack(children: [Image.file(File(imagePath)), if (corners.isNotEmpty) Positioned.fill(child: CustomPaint(painter: PolygonPainter(points: corners)))]);
           },
         );
       },
     );
   }
-
   Future<Size> _getImageSize(File file) async {
     final bytes = await file.readAsBytes();
     final image = img.decodeImage(bytes);
-    if (image == null) return const Size(0, 0);
-    return Size(image.width.toDouble(), image.height.toDouble());
+    return image == null ? const Size(0, 0) : Size(image.width.toDouble(), image.height.toDouble());
   }
 }
 
 class PolygonPainter extends CustomPainter {
   final List<Offset> points;
-
   PolygonPainter({required this.points});
-
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.red
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 3.0
-      ..strokeCap = StrokeCap.round;
-
+    final paint = Paint()..color = Colors.red..style = PaintingStyle.stroke..strokeWidth = 3.0..strokeCap = StrokeCap.round;
     if (points.length < 4) return;
-
-    final path = Path()
-      ..moveTo(points[0].dx, points[0].dy)
-      ..lineTo(points[1].dx, points[1].dy)
-      ..lineTo(points[2].dx, points[2].dy)
-      ..lineTo(points[3].dx, points[3].dy)
-      ..close();
-
+    final path = Path()..moveTo(points[0].dx, points[0].dy)..lineTo(points[1].dx, points[1].dy)..lineTo(points[2].dx, points[2].dy)..lineTo(points[3].dx, points[3].dy)..close();
     canvas.drawPath(path, paint);
-
-    // Draw small circles at corners for professional look
     final dotPaint = Paint()..color = Colors.red;
-    for (var point in points) {
-      canvas.drawCircle(point, 5, dotPaint);
-    }
+    for (var p in points) canvas.drawCircle(p, 5, dotPaint);
   }
-
   @override
   bool shouldRepaint(covariant PolygonPainter oldDelegate) => true;
 }
