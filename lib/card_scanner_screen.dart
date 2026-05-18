@@ -434,6 +434,8 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
   Rect? _firstCropRect;
   Rect? _guideOuterRect;
   Rect? _guideInnerRect;
+  Rect? _initialOuterGuide;
+  Rect? _initialInnerGuide;
   Size? _previewCoordinateSize;
   bool _isFirstCropApplied = false;
 
@@ -608,6 +610,8 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
       _previewCoordinateSize = cropped.croppedSize;
       _guideOuterRect = mappedOuterGuide;
       _guideInnerRect = mappedInnerGuide;
+      _initialOuterGuide = mappedOuterGuide;
+      _initialInnerGuide = mappedInnerGuide;
     });
   }
 
@@ -677,9 +681,26 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                     children: [
                       Expanded(child: OutlinedButton(onPressed: () => Navigator.pop(context), style: OutlinedButton.styleFrom(minimumSize: const Size(0, 50), side: const BorderSide(color: Colors.white, width: 2), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))), child: const Text("Retake", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)))),
                       const SizedBox(width: 8),
-                      Expanded(child: ElevatedButton(onPressed: _handleFirstCrop, style: ElevatedButton.styleFrom(minimumSize: const Size(0, 50), backgroundColor: const Color(0xFF4A80F0), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))), child: const Text("Crop", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)))),
+                      // When first crop is applied allow Reset, otherwise show Crop
+                      Expanded(
+                        child: ElevatedButton(
+                          onPressed: _isFirstCropApplied
+                              ? () {
+                                  // Reset guides to initial mapped guides
+                                  if (_initialOuterGuide != null && _initialInnerGuide != null) {
+                                    setState(() {
+                                      _guideOuterRect = _initialOuterGuide;
+                                      _guideInnerRect = _initialInnerGuide;
+                                    });
+                                  }
+                                }
+                              : _handleFirstCrop,
+                          style: ElevatedButton.styleFrom(minimumSize: const Size(0, 50), backgroundColor: const Color(0xFF4A80F0), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+                          child: Text(_isFirstCropApplied ? "Reset" : "Crop", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                        ),
+                      ),
                       const SizedBox(width: 8),
-                      Expanded(child: ElevatedButton(onPressed: _onCheckPressed, style: ElevatedButton.styleFrom(minimumSize: const Size(0, 50), backgroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))), child: const Text("Check", style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)))),
+                      Expanded(child: ElevatedButton(onPressed: _onCheckPressed, style: ElevatedButton.styleFrom(minimumSize: const Size(0, 50), backgroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))), child: Text(_isFirstCropApplied ? "Confirm" : "Check", style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold)))),
                     ],
                   ),
           ),
@@ -786,6 +807,51 @@ class SecondStageCropOverlay extends StatelessWidget {
     return Stack(
       children: [
         Positioned.fill(child: CustomPaint(painter: ZoomCropOverlayPainter(croppedSize: streamSize, outerGuideRect: outerGuideRect, innerGuideRect: innerGuideRect))),
+        // Corner handles for outer guide
+        _buildCornerHandle(
+          point: _toDisplayPoint(Offset(outerGuideRect.left, outerGuideRect.top)),
+          color: Colors.deepPurpleAccent,
+          onDrag: (details) {
+            final dx = _deltaToStreamX(details.delta.dx);
+            final dy = _deltaToStreamY(details.delta.dy);
+            final nextLeft = (outerGuideRect.left + dx).clamp(0.0, outerGuideRect.right - _ConfirmationScreenState._minGap);
+            final nextTop = (outerGuideRect.top + dy).clamp(0.0, outerGuideRect.bottom - _ConfirmationScreenState._minGap);
+            onOuterChanged(Rect.fromLTRB(nextLeft, nextTop, outerGuideRect.right, outerGuideRect.bottom));
+          },
+        ),
+        _buildCornerHandle(
+          point: _toDisplayPoint(Offset(outerGuideRect.right, outerGuideRect.top)),
+          color: Colors.deepPurpleAccent,
+          onDrag: (details) {
+            final dx = _deltaToStreamX(details.delta.dx);
+            final dy = _deltaToStreamY(details.delta.dy);
+            final nextRight = (outerGuideRect.right + dx).clamp(outerGuideRect.left + _ConfirmationScreenState._minGap, streamSize.width);
+            final nextTop = (outerGuideRect.top + dy).clamp(0.0, outerGuideRect.bottom - _ConfirmationScreenState._minGap);
+            onOuterChanged(Rect.fromLTRB(outerGuideRect.left, nextTop, nextRight, outerGuideRect.bottom));
+          },
+        ),
+        _buildCornerHandle(
+          point: _toDisplayPoint(Offset(outerGuideRect.right, outerGuideRect.bottom)),
+          color: Colors.deepPurpleAccent,
+          onDrag: (details) {
+            final dx = _deltaToStreamX(details.delta.dx);
+            final dy = _deltaToStreamY(details.delta.dy);
+            final nextRight = (outerGuideRect.right + dx).clamp(outerGuideRect.left + _ConfirmationScreenState._minGap, streamSize.width);
+            final nextBottom = (outerGuideRect.bottom + dy).clamp(outerGuideRect.top + _ConfirmationScreenState._minGap, streamSize.height);
+            onOuterChanged(Rect.fromLTRB(outerGuideRect.left, outerGuideRect.top, nextRight, nextBottom));
+          },
+        ),
+        _buildCornerHandle(
+          point: _toDisplayPoint(Offset(outerGuideRect.left, outerGuideRect.bottom)),
+          color: Colors.deepPurpleAccent,
+          onDrag: (details) {
+            final dx = _deltaToStreamX(details.delta.dx);
+            final dy = _deltaToStreamY(details.delta.dy);
+            final nextLeft = (outerGuideRect.left + dx).clamp(0.0, outerGuideRect.right - _ConfirmationScreenState._minGap);
+            final nextBottom = (outerGuideRect.bottom + dy).clamp(outerGuideRect.top + _ConfirmationScreenState._minGap, streamSize.height);
+            onOuterChanged(Rect.fromLTRB(nextLeft, outerGuideRect.top, outerGuideRect.right, nextBottom));
+          },
+        ),
         _buildHandle(
           point: _toDisplayPoint(Offset((outerGuideRect.left + outerGuideRect.right) / 2, outerGuideRect.top)),
           icon: Icons.keyboard_arrow_up,
@@ -865,6 +931,22 @@ class SecondStageCropOverlay extends StatelessWidget {
   Widget _buildHandle({required Offset point, required IconData icon, required Color color, required GestureDragUpdateCallback onDrag}) {
     return Positioned(left: point.dx - 28, top: point.dy - 28, child: GestureDetector(onPanUpdate: onDrag, child: Container(width: 56, height: 56, decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(10)), child: Icon(icon, color: Colors.white, size: 36))));
   }
+
+  Widget _buildCornerHandle({required Offset point, required Color color, required GestureDragUpdateCallback onDrag}) {
+    return Positioned(
+      left: point.dx - 18,
+      top: point.dy - 18,
+      child: GestureDetector(
+        onPanUpdate: onDrag,
+        child: Container(
+          width: 36,
+          height: 36,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle, boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 4, offset: Offset(0, 2))]),
+          child: const SizedBox.shrink(),
+        ),
+      ),
+    );
+  }
 }
 
 class ZoomCropOverlayPainter extends CustomPainter {
@@ -895,7 +977,7 @@ class ObjectDetectorPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final Paint paintCorners = Paint()..style = PaintingStyle.stroke..strokeWidth = 5.0..color = Colors.greenAccent..strokeCap = StrokeCap.round;
-    final Paint paintFill = Paint()..style = PaintingStyle.fill..color = Colors.greenAccent.withOpacity(0.1);
+    final Paint paintFill = Paint()..style = PaintingStyle.fill..color = Colors.greenAccent.withAlpha(100);
     for (final object in objects) {
       final rect = _translateRect(object.boundingBox, imageSize, size, rotation, lensDirection);
       canvas.drawRRect(RRect.fromRectAndRadius(rect, const Radius.circular(8)), paintFill);
