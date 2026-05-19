@@ -376,7 +376,7 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
                 ),
               ),
             ),
-          
+
           Positioned(
             bottom: 40,
             left: 0,
@@ -441,9 +441,10 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
   Size? _previewCoordinateSize;
   bool _isFirstCropApplied = false;
 
-  static const double _innerPadding = 20.0;
-  static const double _defaultPadding = 60.0; // Increased padding for easier settlement
+  static const double _guideInnerInset = 20.0;
+  static const double _guideOuterPadFactor = 0.04;
   static const double _minGap = 12.0;
+  static const double _cropPaddingFactor = 0.15;
 
   @override
   void initState() {
@@ -451,20 +452,28 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
     _initializePreviewState();
   }
 
-  void _initializePreviewState() {
+  Future<void> _initializePreviewState() async {
     final streamSize = widget.streamSize;
     final detectedRect = widget.detectedRect;
     if (streamSize == null || detectedRect == null) return;
 
-    final normalizedDetected = Rect.fromLTRB(
-      detectedRect.left.clamp(0.0, streamSize.width).toDouble(),
-      detectedRect.top.clamp(0.0, streamSize.height).toDouble(),
-      detectedRect.right.clamp(0.0, streamSize.width).toDouble(),
-      detectedRect.bottom.clamp(0.0, streamSize.height).toDouble(),
+    final photoSize = await _getImageSize(File(widget.imagePath));
+    if (!mounted || photoSize.width <= 0) return;
+
+    final scaleX = photoSize.width / streamSize.width;
+    final scaleY = photoSize.height / streamSize.height;
+
+    final detectedInPhoto = Rect.fromLTRB(
+      (detectedRect.left * scaleX).clamp(0.0, photoSize.width),
+      (detectedRect.top * scaleY).clamp(0.0, photoSize.height),
+      (detectedRect.right * scaleX).clamp(0.0, photoSize.width),
+      (detectedRect.bottom * scaleY).clamp(0.0, photoSize.height),
     );
 
-    _detectedRectOriginal = normalizedDetected;
-    _previewCoordinateSize = streamSize;
+    setState(() {
+      _detectedRectOriginal = detectedInPhoto;
+      _previewCoordinateSize = photoSize;
+    });
   }
 
   Future<_CropResult?> _cropRectFromImage({
@@ -522,7 +531,7 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
 
     try {
       File imageToUpload;
-      
+
       if (_isFirstCropApplied && _guideOuterRect != null && _previewCoordinateSize != null) {
         // PERFORM FINAL PRECISION CROP based on Outer Guide
         final finalCrop = await _cropRectFromImage(
@@ -561,16 +570,71 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
     return {"success": false, "message": "Server error: ${response.statusCode}"};
   }
 
+  /// Places guide boxes around the detected card inside the cropped image.
+  /// Uses cropped pixel space only: maps detection offset within the first-crop
+  /// region, then scales to [croppedSize].
+  void _setGuideRectsAroundCard({
+    required Rect detectedRect,
+    required Rect firstCropRect,
+    required Size croppedSize,
+  }) {
+    final cardInCropLocal = Rect.fromLTRB(
+      detectedRect.left - firstCropRect.left,
+      detectedRect.top - firstCropRect.top,
+      detectedRect.right - firstCropRect.left,
+      detectedRect.bottom - firstCropRect.top,
+    );
+
+    final scaleX = croppedSize.width / firstCropRect.width;
+    final scaleY = croppedSize.height / firstCropRect.height;
+
+    final cardInCrop = Rect.fromLTRB(
+      cardInCropLocal.left * scaleX,
+      cardInCropLocal.top * scaleY,
+      cardInCropLocal.right * scaleX,
+      cardInCropLocal.bottom * scaleY,
+    );
+
+    final padX = math.max(8.0, cardInCrop.width * _guideOuterPadFactor);
+    final padY = math.max(8.0, cardInCrop.height * _guideOuterPadFactor);
+
+    final outerLeft = (cardInCrop.left - padX).clamp(0.0, croppedSize.width);
+    final outerTop = (cardInCrop.top - padY).clamp(0.0, croppedSize.height);
+    final outerRight = (cardInCrop.right + padX).clamp(0.0, croppedSize.width);
+    final outerBottom = (cardInCrop.bottom + padY).clamp(0.0, croppedSize.height);
+
+    _guideOuterRect = Rect.fromLTRB(
+      outerLeft,
+      outerTop,
+      math.max(outerLeft + _minGap, outerRight),
+      math.max(outerTop + _minGap, outerBottom),
+    );
+
+    _guideInnerRect = Rect.fromLTRB(
+      (_guideOuterRect!.left + _guideInnerInset).clamp(0.0, croppedSize.width),
+      (_guideOuterRect!.top + _guideInnerInset).clamp(0.0, croppedSize.height),
+      (_guideOuterRect!.right - _guideInnerInset).clamp(0.0, croppedSize.width),
+      (_guideOuterRect!.bottom - _guideInnerInset).clamp(0.0, croppedSize.height),
+    );
+
+    if (_guideInnerRect!.width < _minGap || _guideInnerRect!.height < _minGap) {
+      _guideInnerRect = _guideOuterRect!.deflate(_guideInnerInset.clamp(0, _guideOuterRect!.shortestSide / 4));
+    }
+  }
+
   Future<void> _handleFirstCrop() async {
     final detectedRect = _detectedRectOriginal;
     final previewCoordinateSize = _previewCoordinateSize;
     if (_isFirstCropApplied || detectedRect == null || previewCoordinateSize == null) return;
 
+    final paddingX = detectedRect.width * _cropPaddingFactor;
+    final paddingY = detectedRect.height * _cropPaddingFactor;
+
     final firstCropRect = Rect.fromLTRB(
-      math.max(0, detectedRect.left - _defaultPadding),
-      math.max(0, detectedRect.top - _defaultPadding),
-      math.min(previewCoordinateSize.width, detectedRect.right + _defaultPadding),
-      math.min(previewCoordinateSize.height, detectedRect.bottom + _defaultPadding),
+      math.max(0, detectedRect.left - paddingX),
+      math.max(0, detectedRect.top - paddingY),
+      math.min(previewCoordinateSize.width, detectedRect.right + paddingX),
+      math.min(previewCoordinateSize.height, detectedRect.bottom + paddingY),
     );
 
     final cropped = await _cropRectFromImage(
@@ -581,39 +645,20 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
     );
     if (cropped == null || !mounted) return;
 
-    final sourceImage = await _getImageSize(File(widget.imagePath));
-    final sourceScaleX = sourceImage.width / previewCoordinateSize.width;
-    final sourceScaleY = sourceImage.height / previewCoordinateSize.height;
-
-    final detectedPixelRect = Rect.fromLTRB(
-      detectedRect.left * sourceScaleX,
-      detectedRect.top * sourceScaleY,
-      detectedRect.right * sourceScaleX,
-      detectedRect.bottom * sourceScaleY,
+    _setGuideRectsAroundCard(
+      detectedRect: detectedRect,
+      firstCropRect: firstCropRect,
+      croppedSize: cropped.croppedSize,
     );
-
-    final cropPixelRect = cropped.sourcePixelCropRect;
-    final mappedOuterGuide = Rect.fromLTRB(
-      detectedPixelRect.left - cropPixelRect.left,
-      detectedPixelRect.top - cropPixelRect.top,
-      detectedPixelRect.right - cropPixelRect.left,
-      detectedPixelRect.bottom - cropPixelRect.top,
-    );
-    final mappedInnerGuide = Rect.fromLTRB(
-      (mappedOuterGuide.left + _innerPadding).clamp(0.0, mappedOuterGuide.right - _minGap),
-      (mappedOuterGuide.top + _innerPadding).clamp(0.0, mappedOuterGuide.bottom - _minGap),
-      (mappedOuterGuide.right - _innerPadding).clamp(mappedOuterGuide.left + _minGap, cropped.croppedSize.width),
-      (mappedOuterGuide.bottom - _innerPadding).clamp(mappedOuterGuide.top + _minGap, cropped.croppedSize.height),
-    );
+    final outerGuide = _guideOuterRect!;
+    final innerGuide = _guideInnerRect!;
 
     setState(() {
       _isFirstCropApplied = true;
       _firstCropRect = firstCropRect;
       _previewCoordinateSize = cropped.croppedSize;
-      _guideOuterRect = mappedOuterGuide;
-      _guideInnerRect = mappedInnerGuide;
-      _initialOuterGuide = mappedOuterGuide;
-      _initialInnerGuide = mappedInnerGuide;
+      _initialOuterGuide = outerGuide;
+      _initialInnerGuide = innerGuide;
     });
   }
 
@@ -625,54 +670,81 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
       body: Column(
         children: [
           Expanded(
-            child: Stack(
-              children: [
-                Center(
-                  child: Image.file(
-                    File(_croppedPath ?? widget.imagePath),
-                    key: ValueKey(_croppedPath),
-                    fit: BoxFit.contain,
-                  ),
-                ),
-                if (!_isFirstCropApplied && _detectedRectOriginal != null && _previewCoordinateSize != null)
-                  Positioned.fill(
-                    child: LayoutBuilder(
-                      builder: (context, constraints) {
-                        return FutureBuilder<Size>(
-                          future: _getImageSize(File(widget.imagePath)),
-                          builder: (context, snapshot) {
-                            if (!snapshot.hasData) return Container();
-                            final displayRect = _getDisplayedImageRect(containerSize: Size(constraints.maxWidth, constraints.maxHeight), imageSize: snapshot.data!);
-                            return CropEditorOverlay(imageBounds: displayRect, streamSize: _previewCoordinateSize!, detectedRect: _detectedRectOriginal!, onBackgroundTap: _handleFirstCrop);
-                          },
-                        );
-                      },
-                    ),
-                  ),
-                if (_isFirstCropApplied && _croppedPath != null && _guideOuterRect != null && _guideInnerRect != null && _previewCoordinateSize != null)
-                  Positioned.fill(
-                    child: LayoutBuilder(
-                      builder: (context, constraints) {
-                        return FutureBuilder<Size>(
-                          future: _getImageSize(File(_croppedPath!)),
-                          builder: (context, snapshot) {
-                            if (!snapshot.hasData) return Container();
-                            final displayRect = _getDisplayedImageRect(containerSize: Size(constraints.maxWidth, constraints.maxHeight), imageSize: snapshot.data!);
-                            return SecondStageCropOverlay(
-                              imageBounds: displayRect,
-                              streamSize: _previewCoordinateSize!,
+            child: _isFirstCropApplied &&
+                    _croppedPath != null &&
+                    _guideOuterRect != null &&
+                    _guideInnerRect != null &&
+                    _previewCoordinateSize != null
+                ? Center(
+                    child: FittedBox(
+                      fit: BoxFit.contain,
+                      child: SizedBox(
+                        width: _previewCoordinateSize!.width,
+                        height: _previewCoordinateSize!.height,
+                        child: Stack(
+                          clipBehavior: Clip.none,
+                          children: [
+                            Image.file(
+                              File(_croppedPath!),
+                              key: ValueKey(_croppedPath),
+                              width: _previewCoordinateSize!.width,
+                              height: _previewCoordinateSize!.height,
+                              fit: BoxFit.fill,
+                            ),
+                            SecondStageCropOverlay(
+                              imageBounds: Rect.fromLTWH(
+                                0,
+                                0,
+                                _previewCoordinateSize!.width,
+                                _previewCoordinateSize!.height,
+                              ),
+                              coordinateSize: _previewCoordinateSize!,
                               outerGuideRect: _guideOuterRect!,
                               innerGuideRect: _guideInnerRect!,
                               onOuterChanged: (rect) => setState(() => _guideOuterRect = rect),
                               onInnerChanged: (rect) => setState(() => _guideInnerRect = rect),
-                            );
-                          },
-                        );
-                      },
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
+                  )
+                : Stack(
+                    children: [
+                      Center(
+                        child: Image.file(
+                          File(_croppedPath ?? widget.imagePath),
+                          key: ValueKey(_croppedPath),
+                          fit: BoxFit.contain,
+                        ),
+                      ),
+                      if (!_isFirstCropApplied &&
+                          _detectedRectOriginal != null &&
+                          _previewCoordinateSize != null)
+                        Positioned.fill(
+                          child: LayoutBuilder(
+                            builder: (context, constraints) {
+                              return FutureBuilder<Size>(
+                                future: _getImageSize(File(widget.imagePath)),
+                                builder: (context, snapshot) {
+                                  if (!snapshot.hasData) return const SizedBox.shrink();
+                                  final displayRect = _getDisplayedImageRect(
+                                    containerSize: Size(constraints.maxWidth, constraints.maxHeight),
+                                    imageSize: snapshot.data!,
+                                  );
+                                  return CropEditorOverlay(
+                                    imageBounds: displayRect,
+                                    coordinateSize: _previewCoordinateSize!,
+                                    detectedRect: _detectedRectOriginal!,
+                                    onBackgroundTap: _handleFirstCrop,
+                                  );
+                                },
+                              );
+                            },
+                          ),
+                        ),
+                    ],
                   ),
-              ],
-            ),
           ),
           Container(
             padding: const EdgeInsets.all(24.0),
@@ -760,25 +832,25 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
 
 class CropEditorOverlay extends StatelessWidget {
   final Rect imageBounds;
-  final Size streamSize;
+  final Size coordinateSize;
   final Rect detectedRect;
   final VoidCallback onBackgroundTap;
-  const CropEditorOverlay({super.key, required this.imageBounds, required this.streamSize, required this.detectedRect, required this.onBackgroundTap});
+  const CropEditorOverlay({super.key, required this.imageBounds, required this.coordinateSize, required this.detectedRect, required this.onBackgroundTap});
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(behavior: HitTestBehavior.translucent, onTap: onBackgroundTap, child: CustomPaint(painter: CropOverlayPainter(imageBounds: imageBounds, streamSize: streamSize, detectedRect: detectedRect)));
+    return GestureDetector(behavior: HitTestBehavior.translucent, onTap: onBackgroundTap, child: CustomPaint(painter: CropOverlayPainter(imageBounds: imageBounds, coordinateSize: coordinateSize, detectedRect: detectedRect)));
   }
 }
 
 class CropOverlayPainter extends CustomPainter {
   final Rect imageBounds;
-  final Size streamSize;
+  final Size coordinateSize;
   final Rect detectedRect;
-  const CropOverlayPainter({required this.imageBounds, required this.streamSize, required this.detectedRect});
+  const CropOverlayPainter({required this.imageBounds, required this.coordinateSize, required this.detectedRect});
   @override
   void paint(Canvas canvas, Size size) {
-    final scaleX = imageBounds.width / streamSize.width;
-    final scaleY = imageBounds.height / streamSize.height;
+    final scaleX = imageBounds.width / coordinateSize.width;
+    final scaleY = imageBounds.height / coordinateSize.height;
     final displayRect = Rect.fromLTRB(imageBounds.left + (detectedRect.left * scaleX), imageBounds.top + (detectedRect.top * scaleY), imageBounds.left + (detectedRect.right * scaleX), imageBounds.top + (detectedRect.bottom * scaleY));
     canvas.drawRect(displayRect, Paint()..color = Colors.deepPurpleAccent..style = PaintingStyle.stroke..strokeWidth = 3);
   }
@@ -788,35 +860,51 @@ class CropOverlayPainter extends CustomPainter {
 
 class SecondStageCropOverlay extends StatelessWidget {
   final Rect imageBounds;
-  final Size streamSize;
+  final Size coordinateSize;
   final Rect outerGuideRect;
   final Rect innerGuideRect;
   final ValueChanged<Rect> onOuterChanged;
   final ValueChanged<Rect> onInnerChanged;
 
-  const SecondStageCropOverlay({super.key, required this.imageBounds, required this.streamSize, required this.outerGuideRect, required this.innerGuideRect, required this.onOuterChanged, required this.onInnerChanged});
+  const SecondStageCropOverlay({
+    super.key,
+    required this.imageBounds,
+    required this.coordinateSize,
+    required this.outerGuideRect,
+    required this.innerGuideRect,
+    required this.onOuterChanged,
+    required this.onInnerChanged,
+  });
 
   Offset _toDisplayPoint(Offset point) {
-    final scaleX = imageBounds.width / streamSize.width;
-    final scaleY = imageBounds.height / streamSize.height;
+    final scaleX = imageBounds.width / coordinateSize.width;
+    final scaleY = imageBounds.height / coordinateSize.height;
     return Offset(imageBounds.left + (point.dx * scaleX), imageBounds.top + (point.dy * scaleY));
   }
 
-  double _deltaToStreamX(double delta) => delta * streamSize.width / imageBounds.width;
-  double _deltaToStreamY(double delta) => delta * streamSize.height / imageBounds.height;
+  double _deltaToCoordinateX(double delta) => delta * coordinateSize.width / imageBounds.width;
+  double _deltaToCoordinateY(double delta) => delta * coordinateSize.height / imageBounds.height;
 
   @override
   Widget build(BuildContext context) {
     return Stack(
       children: [
-        Positioned.fill(child: CustomPaint(painter: ZoomCropOverlayPainter(croppedSize: streamSize, outerGuideRect: outerGuideRect, innerGuideRect: innerGuideRect))),
+        Positioned.fill(
+          child: CustomPaint(
+            painter: GuideBoxesPainter(
+              coordinateSize: coordinateSize,
+              outerGuideRect: outerGuideRect,
+              innerGuideRect: innerGuideRect,
+            ),
+          ),
+        ),
         // Corner handles for outer guide
         _buildCornerHandle(
           point: _toDisplayPoint(Offset(outerGuideRect.left, outerGuideRect.top)),
           color: Colors.deepPurpleAccent,
           onDrag: (details) {
-            final dx = _deltaToStreamX(details.delta.dx);
-            final dy = _deltaToStreamY(details.delta.dy);
+            final dx = _deltaToCoordinateX(details.delta.dx);
+            final dy = _deltaToCoordinateY(details.delta.dy);
             final nextLeft = (outerGuideRect.left + dx).clamp(0.0, outerGuideRect.right - _ConfirmationScreenState._minGap);
             final nextTop = (outerGuideRect.top + dy).clamp(0.0, outerGuideRect.bottom - _ConfirmationScreenState._minGap);
             onOuterChanged(Rect.fromLTRB(nextLeft, nextTop, outerGuideRect.right, outerGuideRect.bottom));
@@ -826,9 +914,9 @@ class SecondStageCropOverlay extends StatelessWidget {
           point: _toDisplayPoint(Offset(outerGuideRect.right, outerGuideRect.top)),
           color: Colors.deepPurpleAccent,
           onDrag: (details) {
-            final dx = _deltaToStreamX(details.delta.dx);
-            final dy = _deltaToStreamY(details.delta.dy);
-            final nextRight = (outerGuideRect.right + dx).clamp(outerGuideRect.left + _ConfirmationScreenState._minGap, streamSize.width);
+            final dx = _deltaToCoordinateX(details.delta.dx);
+            final dy = _deltaToCoordinateY(details.delta.dy);
+            final nextRight = (outerGuideRect.right + dx).clamp(outerGuideRect.left + _ConfirmationScreenState._minGap, coordinateSize.width);
             final nextTop = (outerGuideRect.top + dy).clamp(0.0, outerGuideRect.bottom - _ConfirmationScreenState._minGap);
             onOuterChanged(Rect.fromLTRB(outerGuideRect.left, nextTop, nextRight, outerGuideRect.bottom));
           },
@@ -837,10 +925,10 @@ class SecondStageCropOverlay extends StatelessWidget {
           point: _toDisplayPoint(Offset(outerGuideRect.right, outerGuideRect.bottom)),
           color: Colors.deepPurpleAccent,
           onDrag: (details) {
-            final dx = _deltaToStreamX(details.delta.dx);
-            final dy = _deltaToStreamY(details.delta.dy);
-            final nextRight = (outerGuideRect.right + dx).clamp(outerGuideRect.left + _ConfirmationScreenState._minGap, streamSize.width);
-            final nextBottom = (outerGuideRect.bottom + dy).clamp(outerGuideRect.top + _ConfirmationScreenState._minGap, streamSize.height);
+            final dx = _deltaToCoordinateX(details.delta.dx);
+            final dy = _deltaToCoordinateY(details.delta.dy);
+            final nextRight = (outerGuideRect.right + dx).clamp(outerGuideRect.left + _ConfirmationScreenState._minGap, coordinateSize.width);
+            final nextBottom = (outerGuideRect.bottom + dy).clamp(outerGuideRect.top + _ConfirmationScreenState._minGap, coordinateSize.height);
             onOuterChanged(Rect.fromLTRB(outerGuideRect.left, outerGuideRect.top, nextRight, nextBottom));
           },
         ),
@@ -848,10 +936,10 @@ class SecondStageCropOverlay extends StatelessWidget {
           point: _toDisplayPoint(Offset(outerGuideRect.left, outerGuideRect.bottom)),
           color: Colors.deepPurpleAccent,
           onDrag: (details) {
-            final dx = _deltaToStreamX(details.delta.dx);
-            final dy = _deltaToStreamY(details.delta.dy);
+            final dx = _deltaToCoordinateX(details.delta.dx);
+            final dy = _deltaToCoordinateY(details.delta.dy);
             final nextLeft = (outerGuideRect.left + dx).clamp(0.0, outerGuideRect.right - _ConfirmationScreenState._minGap);
-            final nextBottom = (outerGuideRect.bottom + dy).clamp(outerGuideRect.top + _ConfirmationScreenState._minGap, streamSize.height);
+            final nextBottom = (outerGuideRect.bottom + dy).clamp(outerGuideRect.top + _ConfirmationScreenState._minGap, coordinateSize.height);
             onOuterChanged(Rect.fromLTRB(nextLeft, outerGuideRect.top, outerGuideRect.right, nextBottom));
           },
         ),
@@ -860,7 +948,7 @@ class SecondStageCropOverlay extends StatelessWidget {
           icon: Icons.keyboard_arrow_up,
           color: Colors.deepPurpleAccent,
           onDrag: (details) {
-            final nextTop = (outerGuideRect.top + _deltaToStreamY(details.delta.dy)).clamp(0.0, innerGuideRect.top - _ConfirmationScreenState._minGap);
+            final nextTop = (outerGuideRect.top + _deltaToCoordinateY(details.delta.dy)).clamp(0.0, innerGuideRect.top - _ConfirmationScreenState._minGap);
             onOuterChanged(Rect.fromLTRB(outerGuideRect.left, nextTop, outerGuideRect.right, outerGuideRect.bottom));
           },
         ),
@@ -869,7 +957,7 @@ class SecondStageCropOverlay extends StatelessWidget {
           icon: Icons.keyboard_arrow_down,
           color: Colors.deepPurpleAccent,
           onDrag: (details) {
-            final nextBottom = (outerGuideRect.bottom + _deltaToStreamY(details.delta.dy)).clamp(innerGuideRect.bottom + _ConfirmationScreenState._minGap, streamSize.height);
+            final nextBottom = (outerGuideRect.bottom + _deltaToCoordinateY(details.delta.dy)).clamp(innerGuideRect.bottom + _ConfirmationScreenState._minGap, coordinateSize.height);
             onOuterChanged(Rect.fromLTRB(outerGuideRect.left, outerGuideRect.top, outerGuideRect.right, nextBottom));
           },
         ),
@@ -878,7 +966,7 @@ class SecondStageCropOverlay extends StatelessWidget {
           icon: Icons.keyboard_arrow_left,
           color: Colors.deepPurpleAccent,
           onDrag: (details) {
-            final nextLeft = (outerGuideRect.left + _deltaToStreamX(details.delta.dx)).clamp(0.0, innerGuideRect.left - _ConfirmationScreenState._minGap);
+            final nextLeft = (outerGuideRect.left + _deltaToCoordinateX(details.delta.dx)).clamp(0.0, innerGuideRect.left - _ConfirmationScreenState._minGap);
             onOuterChanged(Rect.fromLTRB(nextLeft, outerGuideRect.top, outerGuideRect.right, outerGuideRect.bottom));
           },
         ),
@@ -887,7 +975,7 @@ class SecondStageCropOverlay extends StatelessWidget {
           icon: Icons.keyboard_arrow_right,
           color: Colors.deepPurpleAccent,
           onDrag: (details) {
-            final nextRight = (outerGuideRect.right + _deltaToStreamX(details.delta.dx)).clamp(innerGuideRect.right + _ConfirmationScreenState._minGap, streamSize.width);
+            final nextRight = (outerGuideRect.right + _deltaToCoordinateX(details.delta.dx)).clamp(innerGuideRect.right + _ConfirmationScreenState._minGap, coordinateSize.width);
             onOuterChanged(Rect.fromLTRB(outerGuideRect.left, outerGuideRect.top, nextRight, outerGuideRect.bottom));
           },
         ),
@@ -896,7 +984,7 @@ class SecondStageCropOverlay extends StatelessWidget {
           icon: Icons.keyboard_arrow_up,
           color: Colors.green,
           onDrag: (details) {
-            final nextTop = (innerGuideRect.top + _deltaToStreamY(details.delta.dy)).clamp(outerGuideRect.top + _ConfirmationScreenState._minGap, innerGuideRect.bottom - _ConfirmationScreenState._minGap);
+            final nextTop = (innerGuideRect.top + _deltaToCoordinateY(details.delta.dy)).clamp(outerGuideRect.top + _ConfirmationScreenState._minGap, innerGuideRect.bottom - _ConfirmationScreenState._minGap);
             onInnerChanged(Rect.fromLTRB(innerGuideRect.left, nextTop, innerGuideRect.right, innerGuideRect.bottom));
           },
         ),
@@ -905,7 +993,7 @@ class SecondStageCropOverlay extends StatelessWidget {
           icon: Icons.keyboard_arrow_down,
           color: Colors.green,
           onDrag: (details) {
-            final nextBottom = (innerGuideRect.bottom + _deltaToStreamY(details.delta.dy)).clamp(innerGuideRect.top + _ConfirmationScreenState._minGap, outerGuideRect.bottom - _ConfirmationScreenState._minGap);
+            final nextBottom = (innerGuideRect.bottom + _deltaToCoordinateY(details.delta.dy)).clamp(innerGuideRect.top + _ConfirmationScreenState._minGap, outerGuideRect.bottom - _ConfirmationScreenState._minGap);
             onInnerChanged(Rect.fromLTRB(innerGuideRect.left, innerGuideRect.top, innerGuideRect.right, nextBottom));
           },
         ),
@@ -914,7 +1002,7 @@ class SecondStageCropOverlay extends StatelessWidget {
           icon: Icons.keyboard_arrow_left,
           color: Colors.green,
           onDrag: (details) {
-            final nextLeft = (innerGuideRect.left + _deltaToStreamX(details.delta.dx)).clamp(outerGuideRect.left + _ConfirmationScreenState._minGap, innerGuideRect.right - _ConfirmationScreenState._minGap);
+            final nextLeft = (innerGuideRect.left + _deltaToCoordinateX(details.delta.dx)).clamp(outerGuideRect.left + _ConfirmationScreenState._minGap, innerGuideRect.right - _ConfirmationScreenState._minGap);
             onInnerChanged(Rect.fromLTRB(nextLeft, innerGuideRect.top, innerGuideRect.right, innerGuideRect.bottom));
           },
         ),
@@ -923,7 +1011,7 @@ class SecondStageCropOverlay extends StatelessWidget {
           icon: Icons.keyboard_arrow_right,
           color: Colors.green,
           onDrag: (details) {
-            final nextRight = (innerGuideRect.right + _deltaToStreamX(details.delta.dx)).clamp(innerGuideRect.left + _ConfirmationScreenState._minGap, outerGuideRect.right - _ConfirmationScreenState._minGap);
+            final nextRight = (innerGuideRect.right + _deltaToCoordinateX(details.delta.dx)).clamp(innerGuideRect.left + _ConfirmationScreenState._minGap, outerGuideRect.right - _ConfirmationScreenState._minGap);
             onInnerChanged(Rect.fromLTRB(innerGuideRect.left, innerGuideRect.top, nextRight, innerGuideRect.bottom));
           },
         ),
@@ -952,23 +1040,48 @@ class SecondStageCropOverlay extends StatelessWidget {
   }
 }
 
-class ZoomCropOverlayPainter extends CustomPainter {
-  final Size croppedSize;
+class GuideBoxesPainter extends CustomPainter {
+  final Size coordinateSize;
   final Rect outerGuideRect;
   final Rect innerGuideRect;
-  const ZoomCropOverlayPainter({required this.croppedSize, required this.outerGuideRect, required this.innerGuideRect});
+
+  const GuideBoxesPainter({
+    required this.coordinateSize,
+    required this.outerGuideRect,
+    required this.innerGuideRect,
+  });
+
   Rect _scaleRect(Rect rect, Size size) {
-    final scaleX = size.width / croppedSize.width;
-    final scaleY = size.height / croppedSize.height;
-    return Rect.fromLTRB(rect.left * scaleX, rect.top * scaleY, rect.right * scaleX, rect.bottom * scaleY);
+    final scaleX = size.width / coordinateSize.width;
+    final scaleY = size.height / coordinateSize.height;
+    return Rect.fromLTRB(
+      rect.left * scaleX,
+      rect.top * scaleY,
+      rect.right * scaleX,
+      rect.bottom * scaleY,
+    );
   }
+
   @override
   void paint(Canvas canvas, Size size) {
-    canvas.drawRect(_scaleRect(outerGuideRect, size), Paint()..color = Colors.deepPurpleAccent..style = PaintingStyle.stroke..strokeWidth = 2);
-    canvas.drawRect(_scaleRect(innerGuideRect, size), Paint()..color = Colors.green..style = PaintingStyle.stroke..strokeWidth = 2);
+    canvas.drawRect(
+      _scaleRect(outerGuideRect, size),
+      Paint()
+        ..color = Colors.deepPurpleAccent
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2,
+    );
+    canvas.drawRect(
+      _scaleRect(innerGuideRect, size),
+      Paint()
+        ..color = Colors.green
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2,
+    );
   }
+
   @override
-  bool shouldRepaint(covariant ZoomCropOverlayPainter oldDelegate) => true;
+  bool shouldRepaint(covariant GuideBoxesPainter oldDelegate) => true;
 }
 
 class ObjectDetectorPainter extends CustomPainter {
