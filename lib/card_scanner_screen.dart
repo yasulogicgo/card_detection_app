@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
@@ -47,7 +47,9 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
   }
 
   void _startSensorTracking() {
-    _accelerometerSubscription = accelerometerEvents.listen((AccelerometerEvent event) {
+    _accelerometerSubscription = accelerometerEvents.listen((
+      AccelerometerEvent event,
+    ) {
       if (!mounted) return;
 
       double x = event.x;
@@ -55,7 +57,8 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
       double z = event.z;
 
       // Calculate the angle from the Z-axis (how "flat" the phone is)
-      double tilt = math.acos(z / math.sqrt(x * x + y * y + z * z)) * (180 / math.pi);
+      double tilt =
+          math.acos(z / math.sqrt(x * x + y * y + z * z)) * (180 / math.pi);
 
       setState(() {
         _tiltX = x;
@@ -83,7 +86,9 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
 
     await _cameraController!.initialize();
     await _cameraController!.setFlashMode(FlashMode.off); // Ensure flash is off
-    await _cameraController!.lockCaptureOrientation(DeviceOrientation.portraitUp);
+    await _cameraController!.lockCaptureOrientation(
+      DeviceOrientation.portraitUp,
+    );
 
     _objectDetector = ObjectDetector(
       options: ObjectDetectorOptions(
@@ -131,7 +136,10 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
       DetectedObject? bestCard;
       if (objects.isNotEmpty) {
         final object = objects.first;
-        if (_isCard(object.boundingBox, Size(image.width.toDouble(), image.height.toDouble()))) {
+        if (_isCard(
+          object.boundingBox,
+          Size(image.width.toDouble(), image.height.toDouble()),
+        )) {
           bestCard = object;
         }
       }
@@ -139,10 +147,12 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
       if (mounted) {
         setState(() {
           _detectedObject = bestCard;
-          final imageRotation = inputImage.metadata?.rotation ?? InputImageRotation.rotation0deg;
+          final imageRotation =
+              inputImage.metadata?.rotation ?? InputImageRotation.rotation0deg;
           final imageSize = inputImage.metadata?.size ?? Size.zero;
 
-          _imageSize = (imageRotation == InputImageRotation.rotation90deg ||
+          _imageSize =
+              (imageRotation == InputImageRotation.rotation90deg ||
                   imageRotation == InputImageRotation.rotation270deg)
               ? Size(imageSize.height, imageSize.width)
               : imageSize;
@@ -163,8 +173,12 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
     if (camera == null) return null;
 
     final sensorOrientation = camera.sensorOrientation;
-    final imageRotation = InputImageRotationValue.fromRawValue(sensorOrientation) ?? InputImageRotation.rotation0deg;
-    final inputImageFormat = InputImageFormatValue.fromRawValue(image.format.raw) ?? InputImageFormat.nv21;
+    final imageRotation =
+        InputImageRotationValue.fromRawValue(sensorOrientation) ??
+        InputImageRotation.rotation0deg;
+    final inputImageFormat =
+        InputImageFormatValue.fromRawValue(image.format.raw) ??
+        InputImageFormat.nv21;
 
     final plane = image.planes.first;
 
@@ -215,7 +229,10 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
       return;
     }
 
-    if (_isCapturing || _cameraController == null || !_cameraController!.value.isInitialized) return;
+    if (_isCapturing ||
+        _cameraController == null ||
+        !_cameraController!.value.isInitialized)
+      return;
 
     final currentRect = _detectedObject?.boundingBox;
     final currentStreamSize = _imageSize;
@@ -257,7 +274,9 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
         _isCapturing = false;
         _detectedObject = null;
       });
-      _cameraController?.setFlashMode(FlashMode.off); // Ensure flash is off on resume
+      _cameraController?.setFlashMode(
+        FlashMode.off,
+      ); // Ensure flash is off on resume
       _cameraController?.startImageStream(_processCameraImage);
     }
   }
@@ -273,9 +292,7 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
   @override
   Widget build(BuildContext context) {
     if (_cameraController == null || !_cameraController!.value.isInitialized) {
-      return const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
-      );
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
     final previewAspectRatio = 1 / _cameraController!.value.aspectRatio;
@@ -292,7 +309,9 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
             ),
           ),
 
-          if (_detectedObject != null && _imageSize != null && _rotation != null)
+          if (_detectedObject != null &&
+              _imageSize != null &&
+              _rotation != null)
             IgnorePointer(
               child: Center(
                 child: AspectRatio(
@@ -317,9 +336,14 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
               right: 0,
               child: Center(
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 8,
+                  ),
                   decoration: BoxDecoration(
-                    color: _isDeviceLevel ? Colors.green.withOpacity(0.8) : Colors.red.withOpacity(0.8),
+                    color: _isDeviceLevel
+                        ? Colors.green.withOpacity(0.8)
+                        : Colors.red.withOpacity(0.8),
                     borderRadius: BorderRadius.circular(20),
                   ),
                   child: Row(
@@ -332,7 +356,10 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
                       const SizedBox(width: 8),
                       Text(
                         _isDeviceLevel ? "DEVICE LEVEL" : "HOLD PHONE FLAT",
-                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
                     ],
                   ),
@@ -356,7 +383,10 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
                       child: Container(
                         width: 10,
                         height: 10,
-                        decoration: const BoxDecoration(color: Colors.white24, shape: BoxShape.circle),
+                        decoration: const BoxDecoration(
+                          color: Colors.white24,
+                          shape: BoxShape.circle,
+                        ),
                       ),
                     ),
                     AnimatedPositioned(
@@ -386,11 +416,13 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
                   ? const CircularProgressIndicator(color: Colors.white)
                   : FloatingActionButton(
                       onPressed: _captureImage,
-                      backgroundColor: _isDeviceLevel ? Colors.white : Colors.grey,
+                      backgroundColor: _isDeviceLevel
+                          ? Colors.white
+                          : Colors.grey,
                       child: Icon(
                         Icons.camera_alt,
                         color: _isDeviceLevel ? Colors.black : Colors.white54,
-                        size: 28
+                        size: 28,
                       ),
                     ),
             ),
@@ -441,8 +473,10 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
   Size? _previewCoordinateSize;
   bool _isFirstCropApplied = false;
 
+  /// Green inner (main) box: this many pixels inside the purple outer box.
   static const double _guideInnerInset = 20.0;
-  static const double _guideOuterPadFactor = 0.04;
+  /// Purple outer box: fixed padding around the card on first placement (smaller/tighter).
+  static const double _guideOuterInset = -15.0;
   static const double _minGap = 12.0;
   static const double _cropPaddingFactor = 0.15;
 
@@ -482,7 +516,6 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
     required Size coordinateSpace,
     required bool updatePreview,
   }) async {
-
     if (mounted) setState(() => _isUploading = true);
 
     try {
@@ -494,17 +527,36 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
       final scaleX = original.width / coordinateSpace.width;
       final scaleY = original.height / coordinateSpace.height;
 
-      final cropX = (cropRect.left * scaleX).round().clamp(0, original.width - 1);
-      final cropY = (cropRect.top * scaleY).round().clamp(0, original.height - 1);
-      final cropRight = (cropRect.right * scaleX).round().clamp(cropX + 1, original.width);
-      final cropBottom = (cropRect.bottom * scaleY).round().clamp(cropY + 1, original.height);
+      final cropX = (cropRect.left * scaleX).round().clamp(
+        0,
+        original.width - 1,
+      );
+      final cropY = (cropRect.top * scaleY).round().clamp(
+        0,
+        original.height - 1,
+      );
+      final cropRight = (cropRect.right * scaleX).round().clamp(
+        cropX + 1,
+        original.width,
+      );
+      final cropBottom = (cropRect.bottom * scaleY).round().clamp(
+        cropY + 1,
+        original.height,
+      );
       final cropW = math.max(1, cropRight - cropX);
       final cropH = math.max(1, cropBottom - cropY);
 
-      final cropped = img.copyCrop(original, x: cropX, y: cropY, width: cropW, height: cropH);
+      final cropped = img.copyCrop(
+        original,
+        x: cropX,
+        y: cropY,
+        width: cropW,
+        height: cropH,
+      );
 
       final directory = await getTemporaryDirectory();
-      final path = '${directory.path}/crop_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      final path =
+          '${directory.path}/crop_${DateTime.now().millisecondsSinceEpoch}.jpg';
       final croppedFile = File(path);
       await croppedFile.writeAsBytes(img.encodeJpg(cropped));
 
@@ -516,7 +568,12 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
       return _CropResult(
         file: croppedFile,
         croppedSize: Size(cropW.toDouble(), cropH.toDouble()),
-        sourcePixelCropRect: Rect.fromLTWH(cropX.toDouble(), cropY.toDouble(), cropW.toDouble(), cropH.toDouble()),
+        sourcePixelCropRect: Rect.fromLTWH(
+          cropX.toDouble(),
+          cropY.toDouble(),
+          cropW.toDouble(),
+          cropH.toDouble(),
+        ),
       );
     } catch (e) {
       debugPrint("Crop error: $e");
@@ -532,7 +589,9 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
     try {
       File imageToUpload;
 
-      if (_isFirstCropApplied && _guideOuterRect != null && _previewCoordinateSize != null) {
+      if (_isFirstCropApplied &&
+          _guideOuterRect != null &&
+          _previewCoordinateSize != null) {
         // PERFORM FINAL PRECISION CROP based on Outer Guide
         final finalCrop = await _cropRectFromImage(
           sourcePath: _croppedPath ?? widget.imagePath,
@@ -552,11 +611,19 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
 
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(builder: (_) => ResultScreen(imagePath: imageToUpload.path, apiResponse: response)),
+        MaterialPageRoute(
+          builder: (_) => ResultScreen(
+            imagePath: imageToUpload.path,
+            apiResponse: response,
+          ),
+        ),
       );
     } catch (e) {
       debugPrint("API Error: $e");
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Error: $e")));
+      if (mounted)
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text("Error: $e")));
     } finally {
       if (mounted) setState(() => _isUploading = false);
     }
@@ -564,10 +631,19 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
 
   Future<Map<String, dynamic>> _uploadImage(File imageFile) async {
     var request = http.MultipartRequest('POST', Uri.parse(kApiEndpoint));
-    request.files.add(await http.MultipartFile.fromPath('file', imageFile.path, contentType: MediaType('image', 'jpeg')));
+    request.files.add(
+      await http.MultipartFile.fromPath(
+        'file',
+        imageFile.path,
+        contentType: MediaType('image', 'jpeg'),
+      ),
+    );
     var response = await http.Response.fromStream(await request.send());
     if (response.statusCode == 200) return json.decode(response.body);
-    return {"success": false, "message": "Server error: ${response.statusCode}"};
+    return {
+      "success": false,
+      "message": "Server error: ${response.statusCode}",
+    };
   }
 
   /// Places guide boxes around the detected card inside the cropped image.
@@ -595,13 +671,14 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
       cardInCropLocal.bottom * scaleY,
     );
 
-    final padX = math.max(8.0, cardInCrop.width * _guideOuterPadFactor);
-    final padY = math.max(8.0, cardInCrop.height * _guideOuterPadFactor);
-
-    final outerLeft = (cardInCrop.left - padX).clamp(0.0, croppedSize.width);
-    final outerTop = (cardInCrop.top - padY).clamp(0.0, croppedSize.height);
-    final outerRight = (cardInCrop.right + padX).clamp(0.0, croppedSize.width);
-    final outerBottom = (cardInCrop.bottom + padY).clamp(0.0, croppedSize.height);
+    final pad = _guideOuterInset;
+    final outerLeft = (cardInCrop.left - pad).clamp(0.0, croppedSize.width);
+    final outerTop = (cardInCrop.top - pad).clamp(0.0, croppedSize.height);
+    final outerRight = (cardInCrop.right + pad).clamp(0.0, croppedSize.width);
+    final outerBottom = (cardInCrop.bottom + pad).clamp(
+      0.0,
+      croppedSize.height,
+    );
 
     _guideOuterRect = Rect.fromLTRB(
       outerLeft,
@@ -610,22 +687,53 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
       math.max(outerTop + _minGap, outerBottom),
     );
 
-    _guideInnerRect = Rect.fromLTRB(
-      (_guideOuterRect!.left + _guideInnerInset).clamp(0.0, croppedSize.width),
-      (_guideOuterRect!.top + _guideInnerInset).clamp(0.0, croppedSize.height),
-      (_guideOuterRect!.right - _guideInnerInset).clamp(0.0, croppedSize.width),
-      (_guideOuterRect!.bottom - _guideInnerInset).clamp(0.0, croppedSize.height),
+    _guideInnerRect = _innerRectFromOuter(_guideOuterRect!, croppedSize);
+  }
+
+  /// Inner guide = outer inset by exactly [_guideInnerInset] on all sides.
+  Rect _innerRectFromOuter(Rect outer, Size bounds) {
+    final inner = Rect.fromLTRB(
+      outer.left + _guideInnerInset,
+      outer.top + _guideInnerInset,
+      outer.right - _guideInnerInset,
+      outer.bottom - _guideInnerInset,
+    );
+    if (inner.width < _minGap || inner.height < _minGap) {
+      return outer.deflate(_guideInnerInset.clamp(0, outer.shortestSide / 4));
+    }
+    return Rect.fromLTRB(
+      inner.left.clamp(0.0, bounds.width),
+      inner.top.clamp(0.0, bounds.height),
+      inner.right.clamp(0.0, bounds.width),
+      inner.bottom.clamp(0.0, bounds.height),
+    );
+  }
+
+  void _onOuterGuideChanged(Rect outer) {
+    final bounds = _previewCoordinateSize;
+    if (bounds == null) return;
+
+    final minOuterSize = _minGap;
+    final clamped = Rect.fromLTRB(
+      outer.left.clamp(0.0, bounds.width - minOuterSize),
+      outer.top.clamp(0.0, bounds.height - minOuterSize),
+      outer.right.clamp(outer.left + minOuterSize, bounds.width),
+      outer.bottom.clamp(outer.top + minOuterSize, bounds.height),
     );
 
-    if (_guideInnerRect!.width < _minGap || _guideInnerRect!.height < _minGap) {
-      _guideInnerRect = _guideOuterRect!.deflate(_guideInnerInset.clamp(0, _guideOuterRect!.shortestSide / 4));
-    }
+    setState(() {
+      _guideOuterRect = clamped;
+      _guideInnerRect = _innerRectFromOuter(clamped, bounds);
+    });
   }
 
   Future<void> _handleFirstCrop() async {
     final detectedRect = _detectedRectOriginal;
     final previewCoordinateSize = _previewCoordinateSize;
-    if (_isFirstCropApplied || detectedRect == null || previewCoordinateSize == null) return;
+    if (_isFirstCropApplied ||
+        detectedRect == null ||
+        previewCoordinateSize == null)
+      return;
 
     final paddingX = detectedRect.width * _cropPaddingFactor;
     final paddingY = detectedRect.height * _cropPaddingFactor;
@@ -666,11 +774,16 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
-      appBar: AppBar(title: const Text("Preview"), backgroundColor: Colors.transparent, elevation: 0),
+      appBar: AppBar(
+        title: const Text("Preview"),
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+      ),
       body: Column(
         children: [
           Expanded(
-            child: _isFirstCropApplied &&
+            child:
+                _isFirstCropApplied &&
                     _croppedPath != null &&
                     _guideOuterRect != null &&
                     _guideInnerRect != null &&
@@ -701,8 +814,9 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                               coordinateSize: _previewCoordinateSize!,
                               outerGuideRect: _guideOuterRect!,
                               innerGuideRect: _guideInnerRect!,
-                              onOuterChanged: (rect) => setState(() => _guideOuterRect = rect),
-                              onInnerChanged: (rect) => setState(() => _guideInnerRect = rect),
+                              onOuterChanged: _onOuterGuideChanged,
+                              onInnerChanged: (rect) =>
+                                  setState(() => _guideInnerRect = rect),
                             ),
                           ],
                         ),
@@ -727,9 +841,13 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                               return FutureBuilder<Size>(
                                 future: _getImageSize(File(widget.imagePath)),
                                 builder: (context, snapshot) {
-                                  if (!snapshot.hasData) return const SizedBox.shrink();
+                                  if (!snapshot.hasData)
+                                    return const SizedBox.shrink();
                                   final displayRect = _getDisplayedImageRect(
-                                    containerSize: Size(constraints.maxWidth, constraints.maxHeight),
+                                    containerSize: Size(
+                                      constraints.maxWidth,
+                                      constraints.maxHeight,
+                                    ),
                                     imageSize: snapshot.data!,
                                   );
                                   return CropEditorOverlay(
@@ -748,12 +866,36 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
           ),
           Container(
             padding: const EdgeInsets.all(24.0),
-            decoration: const BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+            decoration: const BoxDecoration(
+              color: Colors.black87,
+              borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+            ),
             child: _isUploading
                 ? const Center(child: CircularProgressIndicator())
                 : Row(
                     children: [
-                      Expanded(child: OutlinedButton(onPressed: () => Navigator.pop(context), style: OutlinedButton.styleFrom(minimumSize: const Size(0, 50), side: const BorderSide(color: Colors.white, width: 2), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))), child: const Text("Retake", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)))),
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: () => Navigator.pop(context),
+                          style: OutlinedButton.styleFrom(
+                            minimumSize: const Size(0, 50),
+                            side: const BorderSide(
+                              color: Colors.white,
+                              width: 2,
+                            ),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                          child: const Text(
+                            "Retake",
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ),
                       const SizedBox(width: 8),
                       // When first crop is applied allow Reset, otherwise show Crop
                       Expanded(
@@ -762,31 +904,108 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                               ? () {
                                   // Reset guides to initial mapped guides
                                   // Reset guides to initial mapped guides
-                                  if (_initialOuterGuide != null && _initialInnerGuide != null) {
+                                  if (_initialOuterGuide != null &&
+                                      _previewCoordinateSize != null) {
                                     setState(() {
                                       _guideOuterRect = _initialOuterGuide;
-                                      _guideInnerRect = _initialInnerGuide;
+                                      _guideInnerRect = _innerRectFromOuter(
+                                        _initialOuterGuide!,
+                                        _previewCoordinateSize!,
+                                      );
                                     });
                                   }
                                 }
                               : _handleFirstCrop,
-                          style: ElevatedButton.styleFrom(minimumSize: const Size(0, 50), backgroundColor: const Color(0xFF4A80F0), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
-                          child: Text(_isFirstCropApplied ? "Reset" : "Crop", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                          style: ElevatedButton.styleFrom(
+                            minimumSize: const Size(0, 50),
+                            backgroundColor: const Color(0xFF4A80F0),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                          child: Text(
+                            _isFirstCropApplied ? "Reset" : "Crop",
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
                         ),
                       ),
                       const SizedBox(width: 8),
-                      Expanded(child: ElevatedButton(onPressed: _onCheckPressed, style: ElevatedButton.styleFrom(minimumSize: const Size(0, 50), backgroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))), child: Text(_isFirstCropApplied ? "Confirm" : "Check", style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold)))),
+                      Expanded(
+                        child: ElevatedButton(
+                          onPressed: _onCheckPressed,
+                          style: ElevatedButton.styleFrom(
+                            minimumSize: const Size(0, 50),
+                            backgroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                          child: Text(
+                            _isFirstCropApplied ? "Confirm" : "Check",
+                            style: const TextStyle(
+                              color: Colors.black,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ),
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: () => Navigator.pop(context),
+                          style: OutlinedButton.styleFrom(
+                            minimumSize: const Size(0, 50),
+                            side: const BorderSide(
+                              color: Colors.white,
+                              width: 2,
+                            ),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                          child: const Text(
+                            "auto scan",
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ),
                     ],
                   ),
           ),
-          if (_isFirstCropApplied && _croppedPath != null && _guideOuterRect != null && _guideInnerRect != null)
+          if (_isFirstCropApplied &&
+              _croppedPath != null &&
+              _guideOuterRect != null &&
+              _guideInnerRect != null)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
               child: Row(
                 children: [
-                  Expanded(child: _buildMetricCard("Main +20", _formatSplitValue(_guideInnerRect!.left - _guideOuterRect!.left, _guideOuterRect!.right - _guideInnerRect!.right))),
+                  Expanded(
+                    child: _buildMetricCard(
+                      'Left / Right',
+                      _formatSplitValue(
+                        _guideInnerRect!.left - _guideOuterRect!.left,
+                        _guideOuterRect!.right - _guideInnerRect!.right,
+                      ),
+                      icon: Icons.swap_horiz,
+                    ),
+                  ),
                   const SizedBox(width: 12),
-                  Expanded(child: _buildMetricCard("Outer +40", _formatSplitValue(_guideInnerRect!.top - _guideOuterRect!.top, _guideOuterRect!.bottom - _guideInnerRect!.bottom))),
+                  Expanded(
+                    child: _buildMetricCard(
+                      'Top / Bottom',
+                      _formatSplitValue(
+                        _guideInnerRect!.top - _guideOuterRect!.top,
+                        _guideOuterRect!.bottom - _guideInnerRect!.bottom,
+                      ),
+                      icon: Icons.swap_vert,
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -795,22 +1014,63 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
     );
   }
 
-  Rect _getDisplayedImageRect({required Size containerSize, required Size imageSize}) {
-    final scale = math.min(containerSize.width / imageSize.width, containerSize.height / imageSize.height);
+  Rect _getDisplayedImageRect({
+    required Size containerSize,
+    required Size imageSize,
+  }) {
+    final scale = math.min(
+      containerSize.width / imageSize.width,
+      containerSize.height / imageSize.height,
+    );
     final width = imageSize.width * scale;
     final height = imageSize.height * scale;
-    return Rect.fromLTWH((containerSize.width - width) / 2, (containerSize.height - height) / 2, width, height);
+    return Rect.fromLTWH(
+      (containerSize.width - width) / 2,
+      (containerSize.height - height) / 2,
+      width,
+      height,
+    );
   }
 
-  Widget _buildMetricCard(String title, String value) {
+  Widget _buildMetricCard(String title, String value, {IconData? icon}) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
-      decoration: BoxDecoration(color: const Color(0xFF161616), borderRadius: BorderRadius.circular(18)),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(title, style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
-        const SizedBox(height: 8),
-        Text(value, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700)),
-      ]),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      decoration: BoxDecoration(
+        color: const Color(0xFF161616),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Row(
+        children: [
+          if (icon != null) ...[
+            Icon(icon, color: const Color(0xFF7B61FF), size: 28),
+            const SizedBox(width: 12),
+          ],
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  value,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -826,7 +1086,9 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
     final bytes = await file.readAsBytes();
     final decoded = img.decodeImage(bytes);
     final image = decoded == null ? null : img.bakeOrientation(decoded);
-    return image == null ? const Size(0, 0) : Size(image.width.toDouble(), image.height.toDouble());
+    return image == null
+        ? const Size(0, 0)
+        : Size(image.width.toDouble(), image.height.toDouble());
   }
 }
 
@@ -835,10 +1097,28 @@ class CropEditorOverlay extends StatelessWidget {
   final Size coordinateSize;
   final Rect detectedRect;
   final VoidCallback onBackgroundTap;
-  const CropEditorOverlay({super.key, required this.imageBounds, required this.coordinateSize, required this.detectedRect, required this.onBackgroundTap});
+
+  const CropEditorOverlay({
+    super.key,
+    required this.imageBounds,
+    required this.coordinateSize,
+    required this.detectedRect,
+    required this.onBackgroundTap,
+  });
+
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(behavior: HitTestBehavior.translucent, onTap: onBackgroundTap, child: CustomPaint(painter: CropOverlayPainter(imageBounds: imageBounds, coordinateSize: coordinateSize, detectedRect: detectedRect)));
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTap: onBackgroundTap,
+      child: CustomPaint(
+        painter: CropOverlayPainter(
+          imageBounds: imageBounds,
+          coordinateSize: coordinateSize,
+          detectedRect: detectedRect,
+        ),
+      ),
+    );
   }
 }
 
@@ -846,14 +1126,32 @@ class CropOverlayPainter extends CustomPainter {
   final Rect imageBounds;
   final Size coordinateSize;
   final Rect detectedRect;
-  const CropOverlayPainter({required this.imageBounds, required this.coordinateSize, required this.detectedRect});
+
+  const CropOverlayPainter({
+    required this.imageBounds,
+    required this.coordinateSize,
+    required this.detectedRect,
+  });
+
   @override
   void paint(Canvas canvas, Size size) {
     final scaleX = imageBounds.width / coordinateSize.width;
     final scaleY = imageBounds.height / coordinateSize.height;
-    final displayRect = Rect.fromLTRB(imageBounds.left + (detectedRect.left * scaleX), imageBounds.top + (detectedRect.top * scaleY), imageBounds.left + (detectedRect.right * scaleX), imageBounds.top + (detectedRect.bottom * scaleY));
-    canvas.drawRect(displayRect, Paint()..color = Colors.deepPurpleAccent..style = PaintingStyle.stroke..strokeWidth = 3);
+    final displayRect = Rect.fromLTRB(
+      imageBounds.left + (detectedRect.left * scaleX),
+      imageBounds.top + (detectedRect.top * scaleY),
+      imageBounds.left + (detectedRect.right * scaleX),
+      imageBounds.top + (detectedRect.bottom * scaleY),
+    );
+    canvas.drawRect(
+      displayRect,
+      Paint()
+        ..color = Colors.deepPurpleAccent
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 3,
+    );
   }
+
   @override
   bool shouldRepaint(covariant CropOverlayPainter oldDelegate) => true;
 }
@@ -879,11 +1177,17 @@ class SecondStageCropOverlay extends StatelessWidget {
   Offset _toDisplayPoint(Offset point) {
     final scaleX = imageBounds.width / coordinateSize.width;
     final scaleY = imageBounds.height / coordinateSize.height;
-    return Offset(imageBounds.left + (point.dx * scaleX), imageBounds.top + (point.dy * scaleY));
+    return Offset(
+      imageBounds.left + (point.dx * scaleX),
+      imageBounds.top + (point.dy * scaleY),
+    );
   }
 
-  double _deltaToCoordinateX(double delta) => delta * coordinateSize.width / imageBounds.width;
-  double _deltaToCoordinateY(double delta) => delta * coordinateSize.height / imageBounds.height;
+  double _deltaToCoordinateX(double delta) =>
+      delta * coordinateSize.width / imageBounds.width;
+
+  double _deltaToCoordinateY(double delta) =>
+      delta * coordinateSize.height / imageBounds.height;
 
   @override
   Widget build(BuildContext context) {
@@ -900,140 +1204,383 @@ class SecondStageCropOverlay extends StatelessWidget {
         ),
         // Corner handles for outer guide
         _buildCornerHandle(
-          point: _toDisplayPoint(Offset(outerGuideRect.left, outerGuideRect.top)),
-          color: Colors.deepPurpleAccent,
+          point: _toDisplayPoint(
+            Offset(outerGuideRect.left, outerGuideRect.top),
+          ),
+          color: const Color(0xFF7B61FF),
           onDrag: (details) {
             final dx = _deltaToCoordinateX(details.delta.dx);
             final dy = _deltaToCoordinateY(details.delta.dy);
-            final nextLeft = (outerGuideRect.left + dx).clamp(0.0, outerGuideRect.right - _ConfirmationScreenState._minGap);
-            final nextTop = (outerGuideRect.top + dy).clamp(0.0, outerGuideRect.bottom - _ConfirmationScreenState._minGap);
-            onOuterChanged(Rect.fromLTRB(nextLeft, nextTop, outerGuideRect.right, outerGuideRect.bottom));
+            final nextLeft = (outerGuideRect.left + dx).clamp(
+              0.0,
+              outerGuideRect.right - _ConfirmationScreenState._minGap,
+            );
+            final nextTop = (outerGuideRect.top + dy).clamp(
+              0.0,
+              outerGuideRect.bottom - _ConfirmationScreenState._minGap,
+            );
+            onOuterChanged(
+              Rect.fromLTRB(
+                nextLeft,
+                nextTop,
+                outerGuideRect.right,
+                outerGuideRect.bottom,
+              ),
+            );
           },
         ),
         _buildCornerHandle(
-          point: _toDisplayPoint(Offset(outerGuideRect.right, outerGuideRect.top)),
-          color: Colors.deepPurpleAccent,
+          point: _toDisplayPoint(
+            Offset(outerGuideRect.right, outerGuideRect.top),
+          ),
+          color: const Color(0xFF7B61FF),
           onDrag: (details) {
             final dx = _deltaToCoordinateX(details.delta.dx);
             final dy = _deltaToCoordinateY(details.delta.dy);
-            final nextRight = (outerGuideRect.right + dx).clamp(outerGuideRect.left + _ConfirmationScreenState._minGap, coordinateSize.width);
-            final nextTop = (outerGuideRect.top + dy).clamp(0.0, outerGuideRect.bottom - _ConfirmationScreenState._minGap);
-            onOuterChanged(Rect.fromLTRB(outerGuideRect.left, nextTop, nextRight, outerGuideRect.bottom));
+            final nextRight = (outerGuideRect.right + dx).clamp(
+              outerGuideRect.left + _ConfirmationScreenState._minGap,
+              coordinateSize.width,
+            );
+            final nextTop = (outerGuideRect.top + dy).clamp(
+              0.0,
+              outerGuideRect.bottom - _ConfirmationScreenState._minGap,
+            );
+            onOuterChanged(
+              Rect.fromLTRB(
+                outerGuideRect.left,
+                nextTop,
+                nextRight,
+                outerGuideRect.bottom,
+              ),
+            );
           },
         ),
         _buildCornerHandle(
-          point: _toDisplayPoint(Offset(outerGuideRect.right, outerGuideRect.bottom)),
-          color: Colors.deepPurpleAccent,
+          point: _toDisplayPoint(
+            Offset(outerGuideRect.right, outerGuideRect.bottom),
+          ),
+          color: const Color(0xFF7B61FF),
           onDrag: (details) {
             final dx = _deltaToCoordinateX(details.delta.dx);
             final dy = _deltaToCoordinateY(details.delta.dy);
-            final nextRight = (outerGuideRect.right + dx).clamp(outerGuideRect.left + _ConfirmationScreenState._minGap, coordinateSize.width);
-            final nextBottom = (outerGuideRect.bottom + dy).clamp(outerGuideRect.top + _ConfirmationScreenState._minGap, coordinateSize.height);
-            onOuterChanged(Rect.fromLTRB(outerGuideRect.left, outerGuideRect.top, nextRight, nextBottom));
+            final nextRight = (outerGuideRect.right + dx).clamp(
+              outerGuideRect.left + _ConfirmationScreenState._minGap,
+              coordinateSize.width,
+            );
+            final nextBottom = (outerGuideRect.bottom + dy).clamp(
+              outerGuideRect.top + _ConfirmationScreenState._minGap,
+              coordinateSize.height,
+            );
+            onOuterChanged(
+              Rect.fromLTRB(
+                outerGuideRect.left,
+                outerGuideRect.top,
+                nextRight,
+                nextBottom,
+              ),
+            );
           },
         ),
         _buildCornerHandle(
-          point: _toDisplayPoint(Offset(outerGuideRect.left, outerGuideRect.bottom)),
-          color: Colors.deepPurpleAccent,
+          point: _toDisplayPoint(
+            Offset(outerGuideRect.left, outerGuideRect.bottom),
+          ),
+          color: const Color(0xFF7B61FF),
           onDrag: (details) {
             final dx = _deltaToCoordinateX(details.delta.dx);
             final dy = _deltaToCoordinateY(details.delta.dy);
-            final nextLeft = (outerGuideRect.left + dx).clamp(0.0, outerGuideRect.right - _ConfirmationScreenState._minGap);
-            final nextBottom = (outerGuideRect.bottom + dy).clamp(outerGuideRect.top + _ConfirmationScreenState._minGap, coordinateSize.height);
-            onOuterChanged(Rect.fromLTRB(nextLeft, outerGuideRect.top, outerGuideRect.right, nextBottom));
+            final nextLeft = (outerGuideRect.left + dx).clamp(
+              0.0,
+              outerGuideRect.right - _ConfirmationScreenState._minGap,
+            );
+            final nextBottom = (outerGuideRect.bottom + dy).clamp(
+              outerGuideRect.top + _ConfirmationScreenState._minGap,
+              coordinateSize.height,
+            );
+            onOuterChanged(
+              Rect.fromLTRB(
+                nextLeft,
+                outerGuideRect.top,
+                outerGuideRect.right,
+                nextBottom,
+              ),
+            );
           },
         ),
         _buildHandle(
-          point: _toDisplayPoint(Offset((outerGuideRect.left + outerGuideRect.right) / 2, outerGuideRect.top)),
+          point: _toDisplayPoint(
+            Offset(
+              (outerGuideRect.left + outerGuideRect.right) / 2,
+              outerGuideRect.top,
+            ),
+          ),
           icon: Icons.keyboard_arrow_up,
-          color: Colors.deepPurpleAccent,
+          color: const Color(0xFF7B61FF),
           onDrag: (details) {
-            final nextTop = (outerGuideRect.top + _deltaToCoordinateY(details.delta.dy)).clamp(0.0, innerGuideRect.top - _ConfirmationScreenState._minGap);
-            onOuterChanged(Rect.fromLTRB(outerGuideRect.left, nextTop, outerGuideRect.right, outerGuideRect.bottom));
+            final nextTop =
+                (outerGuideRect.top + _deltaToCoordinateY(details.delta.dy))
+                    .clamp(
+                      0.0,
+                      outerGuideRect.bottom -
+                          _ConfirmationScreenState._minGap -
+                          _ConfirmationScreenState._guideInnerInset * 2,
+                    );
+            onOuterChanged(
+              Rect.fromLTRB(
+                outerGuideRect.left,
+                nextTop,
+                outerGuideRect.right,
+                outerGuideRect.bottom,
+              ),
+            );
           },
         ),
         _buildHandle(
-          point: _toDisplayPoint(Offset((outerGuideRect.left + outerGuideRect.right) / 2, outerGuideRect.bottom)),
+          point: _toDisplayPoint(
+            Offset(
+              (outerGuideRect.left + outerGuideRect.right) / 2,
+              outerGuideRect.bottom,
+            ),
+          ),
           icon: Icons.keyboard_arrow_down,
-          color: Colors.deepPurpleAccent,
+          color: const Color(0xFF7B61FF),
           onDrag: (details) {
-            final nextBottom = (outerGuideRect.bottom + _deltaToCoordinateY(details.delta.dy)).clamp(innerGuideRect.bottom + _ConfirmationScreenState._minGap, coordinateSize.height);
-            onOuterChanged(Rect.fromLTRB(outerGuideRect.left, outerGuideRect.top, outerGuideRect.right, nextBottom));
+            final minBottom =
+                outerGuideRect.top +
+                _ConfirmationScreenState._minGap +
+                _ConfirmationScreenState._guideInnerInset * 2;
+            final nextBottom =
+                (outerGuideRect.bottom + _deltaToCoordinateY(details.delta.dy))
+                    .clamp(minBottom, coordinateSize.height);
+            onOuterChanged(
+              Rect.fromLTRB(
+                outerGuideRect.left,
+                outerGuideRect.top,
+                outerGuideRect.right,
+                nextBottom,
+              ),
+            );
           },
         ),
         _buildHandle(
-          point: _toDisplayPoint(Offset(outerGuideRect.left, (outerGuideRect.top + outerGuideRect.bottom) / 2)),
+          point: _toDisplayPoint(
+            Offset(
+              outerGuideRect.left,
+              (outerGuideRect.top + outerGuideRect.bottom) / 2,
+            ),
+          ),
           icon: Icons.keyboard_arrow_left,
-          color: Colors.deepPurpleAccent,
+          color: const Color(0xFF7B61FF),
           onDrag: (details) {
-            final nextLeft = (outerGuideRect.left + _deltaToCoordinateX(details.delta.dx)).clamp(0.0, innerGuideRect.left - _ConfirmationScreenState._minGap);
-            onOuterChanged(Rect.fromLTRB(nextLeft, outerGuideRect.top, outerGuideRect.right, outerGuideRect.bottom));
+            final maxLeft =
+                outerGuideRect.right -
+                _ConfirmationScreenState._minGap -
+                _ConfirmationScreenState._guideInnerInset * 2;
+            final nextLeft =
+                (outerGuideRect.left + _deltaToCoordinateX(details.delta.dx))
+                    .clamp(0.0, maxLeft);
+            onOuterChanged(
+              Rect.fromLTRB(
+                nextLeft,
+                outerGuideRect.top,
+                outerGuideRect.right,
+                outerGuideRect.bottom,
+              ),
+            );
           },
         ),
         _buildHandle(
-          point: _toDisplayPoint(Offset(outerGuideRect.right, (outerGuideRect.top + outerGuideRect.bottom) / 2)),
+          point: _toDisplayPoint(
+            Offset(
+              outerGuideRect.right,
+              (outerGuideRect.top + outerGuideRect.bottom) / 2,
+            ),
+          ),
           icon: Icons.keyboard_arrow_right,
-          color: Colors.deepPurpleAccent,
+          color: const Color(0xFF7B61FF),
           onDrag: (details) {
-            final nextRight = (outerGuideRect.right + _deltaToCoordinateX(details.delta.dx)).clamp(innerGuideRect.right + _ConfirmationScreenState._minGap, coordinateSize.width);
-            onOuterChanged(Rect.fromLTRB(outerGuideRect.left, outerGuideRect.top, nextRight, outerGuideRect.bottom));
+            final minRight =
+                outerGuideRect.left +
+                _ConfirmationScreenState._minGap +
+                _ConfirmationScreenState._guideInnerInset * 2;
+            final nextRight =
+                (outerGuideRect.right + _deltaToCoordinateX(details.delta.dx))
+                    .clamp(minRight, coordinateSize.width);
+            onOuterChanged(
+              Rect.fromLTRB(
+                outerGuideRect.left,
+                outerGuideRect.top,
+                nextRight,
+                outerGuideRect.bottom,
+              ),
+            );
           },
         ),
         _buildHandle(
-          point: _toDisplayPoint(Offset((innerGuideRect.left + innerGuideRect.right) / 2, innerGuideRect.top)),
+          point: _toDisplayPoint(
+            Offset(
+              (innerGuideRect.left + innerGuideRect.right) / 2,
+              innerGuideRect.top,
+            ),
+          ),
+          icon: Icons.keyboard_arrow_down,
+          color: const Color(0xFF3DDC84),
+          onDrag: (details) {
+            final nextTop =
+                (innerGuideRect.top + _deltaToCoordinateY(details.delta.dy))
+                    .clamp(
+                      outerGuideRect.top + _ConfirmationScreenState._minGap,
+                      innerGuideRect.bottom - _ConfirmationScreenState._minGap,
+                    );
+            onInnerChanged(
+              Rect.fromLTRB(
+                innerGuideRect.left,
+                nextTop,
+                innerGuideRect.right,
+                innerGuideRect.bottom,
+              ),
+            );
+          },
+        ),
+        _buildHandle(
+          point: _toDisplayPoint(
+            Offset(
+              (innerGuideRect.left + innerGuideRect.right) / 2,
+              innerGuideRect.bottom,
+            ),
+          ),
           icon: Icons.keyboard_arrow_up,
-          color: Colors.green,
+          color: const Color(0xFF3DDC84),
           onDrag: (details) {
-            final nextTop = (innerGuideRect.top + _deltaToCoordinateY(details.delta.dy)).clamp(outerGuideRect.top + _ConfirmationScreenState._minGap, innerGuideRect.bottom - _ConfirmationScreenState._minGap);
-            onInnerChanged(Rect.fromLTRB(innerGuideRect.left, nextTop, innerGuideRect.right, innerGuideRect.bottom));
+            final nextBottom =
+                (innerGuideRect.bottom + _deltaToCoordinateY(details.delta.dy))
+                    .clamp(
+                      innerGuideRect.top + _ConfirmationScreenState._minGap,
+                      outerGuideRect.bottom - _ConfirmationScreenState._minGap,
+                    );
+            onInnerChanged(
+              Rect.fromLTRB(
+                innerGuideRect.left,
+                innerGuideRect.top,
+                innerGuideRect.right,
+                nextBottom,
+              ),
+            );
           },
         ),
         _buildHandle(
-          point: _toDisplayPoint(Offset((innerGuideRect.left + innerGuideRect.right) / 2, innerGuideRect.bottom)),
-          icon: Icons.keyboard_arrow_down,
-          color: Colors.green,
-          onDrag: (details) {
-            final nextBottom = (innerGuideRect.bottom + _deltaToCoordinateY(details.delta.dy)).clamp(innerGuideRect.top + _ConfirmationScreenState._minGap, outerGuideRect.bottom - _ConfirmationScreenState._minGap);
-            onInnerChanged(Rect.fromLTRB(innerGuideRect.left, innerGuideRect.top, innerGuideRect.right, nextBottom));
-          },
-        ),
-        _buildHandle(
-          point: _toDisplayPoint(Offset(innerGuideRect.left, (innerGuideRect.top + innerGuideRect.bottom) / 2)),
-          icon: Icons.keyboard_arrow_left,
-          color: Colors.green,
-          onDrag: (details) {
-            final nextLeft = (innerGuideRect.left + _deltaToCoordinateX(details.delta.dx)).clamp(outerGuideRect.left + _ConfirmationScreenState._minGap, innerGuideRect.right - _ConfirmationScreenState._minGap);
-            onInnerChanged(Rect.fromLTRB(nextLeft, innerGuideRect.top, innerGuideRect.right, innerGuideRect.bottom));
-          },
-        ),
-        _buildHandle(
-          point: _toDisplayPoint(Offset(innerGuideRect.right, (innerGuideRect.top + innerGuideRect.bottom) / 2)),
+          point: _toDisplayPoint(
+            Offset(
+              innerGuideRect.left,
+              (innerGuideRect.top + innerGuideRect.bottom) / 2,
+            ),
+          ),
           icon: Icons.keyboard_arrow_right,
-          color: Colors.green,
+          color: const Color(0xFF3DDC84),
           onDrag: (details) {
-            final nextRight = (innerGuideRect.right + _deltaToCoordinateX(details.delta.dx)).clamp(innerGuideRect.left + _ConfirmationScreenState._minGap, outerGuideRect.right - _ConfirmationScreenState._minGap);
-            onInnerChanged(Rect.fromLTRB(innerGuideRect.left, innerGuideRect.top, nextRight, innerGuideRect.bottom));
+            final nextLeft =
+                (innerGuideRect.left + _deltaToCoordinateX(details.delta.dx))
+                    .clamp(
+                      outerGuideRect.left + _ConfirmationScreenState._minGap,
+                      innerGuideRect.right - _ConfirmationScreenState._minGap,
+                    );
+            onInnerChanged(
+              Rect.fromLTRB(
+                nextLeft,
+                innerGuideRect.top,
+                innerGuideRect.right,
+                innerGuideRect.bottom,
+              ),
+            );
+          },
+        ),
+        _buildHandle(
+          point: _toDisplayPoint(
+            Offset(
+              innerGuideRect.right,
+              (innerGuideRect.top + innerGuideRect.bottom) / 2,
+            ),
+          ),
+          icon: Icons.keyboard_arrow_left,
+          color: const Color(0xFF3DDC84),
+          onDrag: (details) {
+            final nextRight =
+                (innerGuideRect.right + _deltaToCoordinateX(details.delta.dx))
+                    .clamp(
+                      innerGuideRect.left + _ConfirmationScreenState._minGap,
+                      outerGuideRect.right - _ConfirmationScreenState._minGap,
+                    );
+            onInnerChanged(
+              Rect.fromLTRB(
+                innerGuideRect.left,
+                innerGuideRect.top,
+                nextRight,
+                innerGuideRect.bottom,
+              ),
+            );
           },
         ),
       ],
     );
   }
 
-  Widget _buildHandle({required Offset point, required IconData icon, required Color color, required GestureDragUpdateCallback onDrag}) {
-    return Positioned(left: point.dx - 28, top: point.dy - 28, child: GestureDetector(onPanUpdate: onDrag, child: Container(width: 56, height: 56, decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(10)), child: Icon(icon, color: Colors.white, size: 36))));
-  }
-
-  Widget _buildCornerHandle({required Offset point, required Color color, required GestureDragUpdateCallback onDrag}) {
+  Widget _buildHandle({
+    required Offset point,
+    required IconData icon,
+    required Color color,
+    required GestureDragUpdateCallback onDrag,
+  }) {
+    const size = 32.0;
     return Positioned(
-      left: point.dx - 18,
-      top: point.dy - 18,
+      left: point.dx - size / 2,
+      top: point.dy - size / 2,
       child: GestureDetector(
         onPanUpdate: onDrag,
         child: Container(
-          width: 36,
-          height: 36,
-          decoration: BoxDecoration(color: color, shape: BoxShape.circle, boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 4, offset: Offset(0, 2))]),
-          child: const SizedBox.shrink(),
+          width: size,
+          height: size,
+          decoration: BoxDecoration(
+            color: color,
+            borderRadius: BorderRadius.circular(10),
+            boxShadow: const [
+              BoxShadow(
+                color: Colors.black45,
+                blurRadius: 6,
+                offset: Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Icon(icon, color: Colors.white, size: 12),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCornerHandle({
+    required Offset point,
+    required Color color,
+    required GestureDragUpdateCallback onDrag,
+  }) {
+    const size = 10.0;
+    return Positioned(
+      left: point.dx - size / 2,
+      top: point.dy - size / 2,
+      child: GestureDetector(
+        onPanUpdate: onDrag,
+        child: Container(
+          width: size,
+          height: size,
+          decoration: BoxDecoration(
+            color: color,
+            shape: BoxShape.circle,
+            boxShadow: const [
+              BoxShadow(
+                color: Colors.black45,
+                blurRadius: 6,
+                offset: Offset(0, 2),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -1064,24 +1611,66 @@ class GuideBoxesPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    final outer = _scaleRect(outerGuideRect, size);
+    final inner = _scaleRect(innerGuideRect, size);
+
+    final full = Path()..addRect(Offset.zero & size);
+    final hole = Path()..addRect(outer);
+    canvas.drawPath(
+      Path.combine(PathOperation.difference, full, hole),
+      Paint()..color = Colors.black.withValues(alpha: 0.45),
+    );
+
+    final band = Path()
+      ..fillType = PathFillType.evenOdd
+      ..addRect(outer)
+      ..addRect(inner);
+    canvas.save();
+    canvas.clipPath(band);
+    final hatch = Paint()
+      ..color = const Color(0xFF4A80F0).withValues(alpha: 0.55)
+      ..strokeWidth = 1.5;
+    const spacing = 10.0;
+    for (
+      double x = outer.left - outer.height;
+      x < outer.right + outer.height;
+      x += spacing
+    ) {
+      canvas.drawLine(
+        Offset(x, outer.top),
+        Offset(x + outer.height, outer.bottom),
+        hatch,
+      );
+    }
+    for (double x = outer.left; x < outer.right + outer.height; x += spacing) {
+      canvas.drawLine(
+        Offset(x, outer.bottom),
+        Offset(x - outer.height, outer.top),
+        hatch,
+      );
+    }
+    canvas.restore();
+
     canvas.drawRect(
-      _scaleRect(outerGuideRect, size),
+      outer,
       Paint()
-        ..color = Colors.deepPurpleAccent
+        ..color = const Color(0xFF7B61FF)
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 2,
+        ..strokeWidth = 2.5,
     );
     canvas.drawRect(
-      _scaleRect(innerGuideRect, size),
+      inner,
       Paint()
-        ..color = Colors.green
+        ..color = const Color(0xFF3DDC84)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 2,
     );
   }
 
   @override
-  bool shouldRepaint(covariant GuideBoxesPainter oldDelegate) => true;
+  bool shouldRepaint(covariant GuideBoxesPainter oldDelegate) =>
+      oldDelegate.outerGuideRect != outerGuideRect ||
+      oldDelegate.innerGuideRect != innerGuideRect;
 }
 
 class ObjectDetectorPainter extends CustomPainter {
@@ -1089,16 +1678,50 @@ class ObjectDetectorPainter extends CustomPainter {
   final Size imageSize;
   final InputImageRotation rotation;
   final CameraLensDirection lensDirection;
-  ObjectDetectorPainter(this.objects, this.imageSize, this.rotation, this.lensDirection);
+
+  ObjectDetectorPainter(
+    this.objects,
+    this.imageSize,
+    this.rotation,
+    this.lensDirection,
+  );
+
   @override
   void paint(Canvas canvas, Size size) {
-    final Paint paintCorners = Paint()..style = PaintingStyle.stroke..strokeWidth = 5.0..color = Colors.greenAccent..strokeCap = StrokeCap.round;
-    final Paint paintFill = Paint()..style = PaintingStyle.fill..color = Colors.greenAccent.withAlpha(100);
+    final Paint paintCorners = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 5.0
+      ..color = Colors.greenAccent
+      ..strokeCap = StrokeCap.round;
+    final Paint paintFill = Paint()
+      ..style = PaintingStyle.fill
+      ..color = Colors.greenAccent.withAlpha(100);
     for (final object in objects) {
-      final rect = _translateRect(object.boundingBox, imageSize, size, rotation, lensDirection);
-      canvas.drawRRect(RRect.fromRectAndRadius(rect, const Radius.circular(8)), paintFill);
+      final rect = _translateRect(
+        object.boundingBox,
+        imageSize,
+        size,
+        rotation,
+        lensDirection,
+      );
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(rect, const Radius.circular(8)),
+        paintFill,
+      );
       const double cs = 25.0;
-      final path = Path()..moveTo(rect.left, rect.top + cs)..lineTo(rect.left, rect.top)..lineTo(rect.left + cs, rect.top)..moveTo(rect.right - cs, rect.top)..lineTo(rect.right, rect.top)..lineTo(rect.right, rect.top + cs)..moveTo(rect.right, rect.bottom - cs)..lineTo(rect.right, rect.bottom)..lineTo(rect.right - cs, rect.bottom)..moveTo(rect.left + cs, rect.bottom)..lineTo(rect.left, rect.bottom)..lineTo(rect.left, rect.bottom - cs);
+      final path = Path()
+        ..moveTo(rect.left, rect.top + cs)
+        ..lineTo(rect.left, rect.top)
+        ..lineTo(rect.left + cs, rect.top)
+        ..moveTo(rect.right - cs, rect.top)
+        ..lineTo(rect.right, rect.top)
+        ..lineTo(rect.right, rect.top + cs)
+        ..moveTo(rect.right, rect.bottom - cs)
+        ..lineTo(rect.right, rect.bottom)
+        ..lineTo(rect.right - cs, rect.bottom)
+        ..moveTo(rect.left + cs, rect.bottom)
+        ..lineTo(rect.left, rect.bottom)
+        ..lineTo(rect.left, rect.bottom - cs);
       canvas.drawPath(path, paintCorners);
       final dotPaint = Paint()..color = Colors.greenAccent;
       canvas.drawCircle(rect.topLeft, 6, dotPaint);
@@ -1107,7 +1730,14 @@ class ObjectDetectorPainter extends CustomPainter {
       canvas.drawCircle(rect.bottomRight, 6, dotPaint);
     }
   }
-  Rect _translateRect(Rect rect, Size imageSize, Size widgetSize, InputImageRotation rotation, CameraLensDirection lensDirection) {
+
+  Rect _translateRect(
+    Rect rect,
+    Size imageSize,
+    Size widgetSize,
+    InputImageRotation rotation,
+    CameraLensDirection lensDirection,
+  ) {
     final scaleX = widgetSize.width / imageSize.width;
     final scaleY = widgetSize.height / imageSize.height;
     double left = rect.left * scaleX;
@@ -1121,25 +1751,86 @@ class ObjectDetectorPainter extends CustomPainter {
     }
     return Rect.fromLTRB(left, top, right, bottom);
   }
+
   @override
-  bool shouldRepaint(ObjectDetectorPainter oldDelegate) => oldDelegate.objects != objects || oldDelegate.imageSize != imageSize;
+  bool shouldRepaint(ObjectDetectorPainter oldDelegate) =>
+      oldDelegate.objects != objects || oldDelegate.imageSize != imageSize;
 }
 
 class ResultScreen extends StatelessWidget {
   final String imagePath;
   final Map<String, dynamic> apiResponse;
-  const ResultScreen({super.key, required this.imagePath, required this.apiResponse});
+
+  const ResultScreen({
+    super.key,
+    required this.imagePath,
+    required this.apiResponse,
+  });
+
   @override
   Widget build(BuildContext context) {
     final bool success = apiResponse['success'] ?? false;
     final String message = apiResponse['message'] ?? "Unknown error";
     return Scaffold(
       backgroundColor: Colors.black,
-      appBar: AppBar(title: Text(success ? 'Card Detected' : 'Detection Failed'), backgroundColor: Colors.transparent),
+      appBar: AppBar(
+        title: Text(success ? 'Card Detected' : 'Detection Failed'),
+        backgroundColor: Colors.transparent,
+      ),
       body: Column(
         children: [
-          Expanded(child: Center(child: success ? CardResultPreview(imagePath: imagePath, apiData: apiResponse['data']) : Padding(padding: const EdgeInsets.all(20.0), child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [const Icon(Icons.error_outline, size: 80, color: Colors.red), const SizedBox(height: 16), Text(message, textAlign: TextAlign.center, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white))])))),
-          Padding(padding: const EdgeInsets.all(24.0), child: ElevatedButton(onPressed: () => Navigator.pop(context), style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 50), backgroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))), child: const Text('Back to Camera', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)))),
+          Expanded(
+            child: Center(
+              child: success
+                  ? CardResultPreview(
+                      imagePath: imagePath,
+                      apiData: apiResponse['data'],
+                    )
+                  : Padding(
+                      padding: const EdgeInsets.all(20.0),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Icon(
+                            Icons.error_outline,
+                            size: 80,
+                            color: Colors.red,
+                          ),
+                          const SizedBox(height: 16),
+                          Text(
+                            message,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: ElevatedButton(
+              onPressed: () => Navigator.pop(context),
+              style: ElevatedButton.styleFrom(
+                minimumSize: const Size(double.infinity, 50),
+                backgroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              child: const Text(
+                'Back to Camera',
+                style: TextStyle(
+                  color: Colors.black,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -1149,7 +1840,9 @@ class ResultScreen extends StatelessWidget {
 class CardResultPreview extends StatelessWidget {
   final String imagePath;
   final Map<String, dynamic>? apiData;
+
   const CardResultPreview({super.key, required this.imagePath, this.apiData});
+
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
@@ -1160,16 +1853,29 @@ class CardResultPreview extends StatelessWidget {
             if (!snapshot.hasData) return const CircularProgressIndicator();
             final imageSize = snapshot.data!;
             final scaleX = constraints.maxWidth / imageSize.width;
-            final widgetHeight = constraints.maxWidth * (imageSize.height / imageSize.width);
+            final widgetHeight =
+                constraints.maxWidth * (imageSize.height / imageSize.width);
             final scaleY = widgetHeight / imageSize.height;
             List<Offset> corners = [];
             if (apiData != null) {
               if (apiData!.containsKey('topleft')) {
                 corners = [
-                  Offset(apiData!['topleft']['x'].toDouble() * scaleX, apiData!['topleft']['y'].toDouble() * scaleY),
-                  Offset(apiData!['topright']['x'].toDouble() * scaleX, apiData!['topright']['y'].toDouble() * scaleY),
-                  Offset(apiData!['bottomright']['x'].toDouble() * scaleX, apiData!['bottomright']['y'].toDouble() * scaleY),
-                  Offset(apiData!['bottomleft']['x'].toDouble() * scaleX, apiData!['bottomleft']['y'].toDouble() * scaleY),
+                  Offset(
+                    apiData!['topleft']['x'].toDouble() * scaleX,
+                    apiData!['topleft']['y'].toDouble() * scaleY,
+                  ),
+                  Offset(
+                    apiData!['topright']['x'].toDouble() * scaleX,
+                    apiData!['topright']['y'].toDouble() * scaleY,
+                  ),
+                  Offset(
+                    apiData!['bottomright']['x'].toDouble() * scaleX,
+                    apiData!['bottomright']['y'].toDouble() * scaleY,
+                  ),
+                  Offset(
+                    apiData!['bottomleft']['x'].toDouble() * scaleX,
+                    apiData!['bottomleft']['y'].toDouble() * scaleY,
+                  ),
                 ];
               } else if (apiData!.containsKey('box')) {
                 final box = apiData!['box'];
@@ -1177,34 +1883,64 @@ class CardResultPreview extends StatelessWidget {
                 final top = box['y'].toDouble() * scaleY;
                 final width = box['width'].toDouble() * scaleX;
                 final height = box['height'].toDouble() * scaleY;
-                corners = [Offset(left, top), Offset(left + width, top), Offset(left + width, top + height), Offset(left, top + height)];
+                corners = [
+                  Offset(left, top),
+                  Offset(left + width, top),
+                  Offset(left + width, top + height),
+                  Offset(left, top + height),
+                ];
               }
             }
-            return Stack(children: [Image.file(File(imagePath)), if (corners.isNotEmpty) Positioned.fill(child: CustomPaint(painter: PolygonPainter(points: corners)))]);
+            return Stack(
+              children: [
+                Image.file(File(imagePath)),
+                if (corners.isNotEmpty)
+                  Positioned.fill(
+                    child: CustomPaint(
+                      painter: PolygonPainter(points: corners),
+                    ),
+                  ),
+              ],
+            );
           },
         );
       },
     );
   }
+
   Future<Size> _getImageSize(File file) async {
     final bytes = await file.readAsBytes();
     final image = img.decodeImage(bytes);
-    return image == null ? const Size(0, 0) : Size(image.width.toDouble(), image.height.toDouble());
+    return image == null
+        ? const Size(0, 0)
+        : Size(image.width.toDouble(), image.height.toDouble());
   }
 }
 
 class PolygonPainter extends CustomPainter {
   final List<Offset> points;
+
   PolygonPainter({required this.points});
+
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()..color = Colors.red..style = PaintingStyle.stroke..strokeWidth = 3.0..strokeCap = StrokeCap.round;
+    final paint = Paint()
+      ..color = Colors.red
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3.0
+      ..strokeCap = StrokeCap.round;
     if (points.length < 4) return;
-    final path = Path()..moveTo(points[0].dx, points[0].dy)..lineTo(points[1].dx, points[1].dy)..lineTo(points[2].dx, points[2].dy)..lineTo(points[3].dx, points[3].dy)..close();
+    final path = Path()
+      ..moveTo(points[0].dx, points[0].dy)
+      ..lineTo(points[1].dx, points[1].dy)
+      ..lineTo(points[2].dx, points[2].dy)
+      ..lineTo(points[3].dx, points[3].dy)
+      ..close();
     canvas.drawPath(path, paint);
     final dotPaint = Paint()..color = Colors.red;
     for (var p in points) canvas.drawCircle(p, 5, dotPaint);
   }
+
   @override
   bool shouldRepaint(covariant PolygonPainter oldDelegate) => true;
 }
