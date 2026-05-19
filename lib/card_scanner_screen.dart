@@ -82,6 +82,7 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
     );
 
     await _cameraController!.initialize();
+    await _cameraController!.setFlashMode(FlashMode.off); // Ensure flash is off
     await _cameraController!.lockCaptureOrientation(DeviceOrientation.portraitUp);
 
     _objectDetector = ObjectDetector(
@@ -256,6 +257,7 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
         _isCapturing = false;
         _detectedObject = null;
       });
+      _cameraController?.setFlashMode(FlashMode.off); // Ensure flash is off on resume
       _cameraController?.startImageStream(_processCameraImage);
     }
   }
@@ -686,6 +688,7 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                         child: ElevatedButton(
                           onPressed: _isFirstCropApplied
                               ? () {
+                                  // Reset guides to initial mapped guides
                                   // Reset guides to initial mapped guides
                                   if (_initialOuterGuide != null && _initialInnerGuide != null) {
                                     setState(() {
