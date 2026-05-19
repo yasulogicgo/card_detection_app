@@ -61,7 +61,8 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
 
   List<Offset>? _openCvCorners;
   Rect? _transformedRect;
-  Size? _imageSize;
+  /// Size of the portrait-oriented frame sent to OpenCV (width/height).
+  Size? _analysisSize;
   double _detectionScore = 0.0;
 
   // Sensor variables
@@ -76,7 +77,6 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
   @override
   void initState() {
     super.initState();
-    debugPrint("DETECTOR CREATED");
     _initialize();
     _startSensorTracking();
   }
@@ -122,7 +122,7 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
 
       _cameraController = CameraController(
         backCamera,
-        ResolutionPreset.high,
+        ResolutionPreset.medium,
         enableAudio: false,
         imageFormatGroup: Platform.isAndroid
             ? ImageFormatGroup.nv21
@@ -134,7 +134,6 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
         DeviceOrientation.portraitUp,
       );
 
-      debugPrint("STREAM START");
       await _cameraController!.startImageStream(_processCameraImage);
       if (mounted) {
         setState(() {
@@ -179,38 +178,21 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
   }
 
   Future<void> _processCameraImage(CameraImage image) async {
-    debugPrint("FRAME RECEIVED");
-
-    if (_isProcessing) {
-      debugPrint("SKIP FRAME");
-      return;
-    }
-
-    if (_isCapturing) {
-      return;
-    }
+    if (_isProcessing || _isCapturing) return;
 
     final now = DateTime.now().millisecondsSinceEpoch;
-    if (_lastProcessTime != null && now - _lastProcessTime! < 1200)
-      return; // Further throttle to keep the buffer from backing up
+    if (_lastProcessTime != null && now - _lastProcessTime! < 900) return;
     _lastProcessTime = now;
 
     _isProcessing = true;
-    debugPrint("PROCESS START");
 
     try {
-      debugPrint("FORMAT: ${image.format.group}");
-      debugPrint("SIZE: ${image.width} x ${image.height}");
-
-      final bytes = await _convertCameraImageToJpeg(image);
+      final conversion = await _convertCameraImageToJpeg(image);
       final detectionData = await compute(
         _refineDetectionOnImageIsolate,
-        bytes,
+        conversion.bytes,
       );
       final score = (detectionData['score'] as double?) ?? 0.0;
-      debugPrint(
-        'DETECTION: score=$score corners=${(detectionData['corners'] as List?)?.length ?? 0}',
-      );
 
       List<Offset>? corners;
       if (score > 0 && detectionData['corners'] is List) {
@@ -228,6 +210,7 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
         setState(() {
           _openCvCorners = corners;
           _detectionScore = score;
+          _analysisSize = conversion.analysisSize;
           if (corners != null && corners.length == 4) {
             final xs = corners.map((e) => e.dx).toList();
             final ys = corners.map((e) => e.dy).toList();
@@ -240,18 +223,11 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
           } else {
             _transformedRect = null;
           }
-
-          final rotation =
-              _cameraController?.description.sensorOrientation ?? 0;
-          _imageSize = (rotation == 90 || rotation == 270)
-              ? Size(image.height.toDouble(), image.width.toDouble())
-              : Size(image.width.toDouble(), image.height.toDouble());
         });
       }
     } catch (e) {
-      debugPrint("ERROR: $e");
+      debugPrint('OpenCV frame error: $e');
     } finally {
-      debugPrint("PROCESS END");
       _isProcessing = false;
     }
   }
@@ -281,14 +257,45 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
     return true;
   }
 
-  Future<Uint8List> _convertCameraImageToJpeg(CameraImage image) async {
+  Future<({Uint8List bytes, Size analysisSize})> _convertCameraImageToJpeg(
+    CameraImage image,
+  ) async {
     final converted = _convertCameraImage(image);
     if (converted == null) {
       throw StateError(
         'Unsupported camera image format: ${image.format.group}',
       );
     }
-    return Uint8List.fromList(img.encodeJpg(converted, quality: 80));
+
+    var oriented = _orientImageForPreview(converted);
+    const int maxEdge = 720;
+    if (oriented.width > maxEdge || oriented.height > maxEdge) {
+      oriented = oriented.width >= oriented.height
+          ? img.copyResize(oriented, width: maxEdge)
+          : img.copyResize(oriented, height: maxEdge);
+    }
+
+    final analysisSize = Size(
+      oriented.width.toDouble(),
+      oriented.height.toDouble(),
+    );
+    final bytes = Uint8List.fromList(img.encodeJpg(oriented, quality: 82));
+    return (bytes: bytes, analysisSize: analysisSize);
+  }
+
+  /// Rotate buffer to match portrait [CameraPreview] (sensor is usually landscape).
+  img.Image _orientImageForPreview(img.Image source) {
+    final rotation = _cameraController?.description.sensorOrientation ?? 0;
+    switch (rotation) {
+      case 90:
+        return img.copyRotate(source, angle: 90);
+      case 180:
+        return img.copyRotate(source, angle: 180);
+      case 270:
+        return img.copyRotate(source, angle: 270);
+      default:
+        return source;
+    }
   }
 
   img.Image? _convertCameraImage(CameraImage image) {
@@ -426,7 +433,7 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
       return;
 
     final currentRect = _transformedRect;
-    final currentStreamSize = _imageSize;
+    final currentStreamSize = _analysisSize;
 
     setState(() {
       _isCapturing = true;
@@ -466,6 +473,7 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
       _isCapturing = false;
       _openCvCorners = null;
       _transformedRect = null;
+      _analysisSize = null;
       _detectionScore = 0.0;
     });
 
@@ -522,6 +530,9 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
     }
 
     final previewAspectRatio = _cameraController!.value.aspectRatio;
+    final overlayAspectRatio = _analysisSize != null && _analysisSize!.height > 0
+        ? _analysisSize!.width / _analysisSize!.height
+        : previewAspectRatio;
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -534,28 +545,16 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
               child: CameraPreview(_cameraController!),
             ),
           ),
-          if (_openCvCorners != null || _transformedRect != null)
+          if (_openCvCorners != null && _detectionScore > 0)
             IgnorePointer(
               child: Center(
                 child: AspectRatio(
-                  aspectRatio: previewAspectRatio,
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      if (_openCvCorners != null)
-                        CustomPaint(
-                          painter: SimplePolygonPainter(
-                            points: _openCvCorners!,
-                          ),
-                        ),
-                      if (_transformedRect != null)
-                        CustomPaint(
-                          painter: SimpleBoxPainter(
-                            _transformedRect!,
-                            const Size(1, 1),
-                          ),
-                        ),
-                    ],
+                  aspectRatio: overlayAspectRatio,
+                  child: CustomPaint(
+                    painter: SimplePolygonPainter(
+                      points: _openCvCorners!,
+                      imageSize: _analysisSize,
+                    ),
                   ),
                 ),
               ),
@@ -691,40 +690,6 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
   }
 }
 
-class SimpleBoxPainter extends CustomPainter {
-  final Rect rect;
-  final Size imageSize;
-  SimpleBoxPainter(this.rect, this.imageSize);
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final scaleX = size.width / imageSize.width;
-    final scaleY = size.height / imageSize.height;
-    final paint = Paint()
-      ..color = Colors.greenAccent
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 3.0;
-    final scaledRect = Rect.fromLTRB(
-      rect.left * scaleX,
-      rect.top * scaleY,
-      rect.right * scaleX,
-      rect.bottom * scaleY,
-    );
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(scaledRect, const Radius.circular(8)),
-      paint,
-    );
-    final dotPaint = Paint()..color = Colors.greenAccent;
-    canvas.drawCircle(scaledRect.topLeft, 6, dotPaint);
-    canvas.drawCircle(scaledRect.topRight, 6, dotPaint);
-    canvas.drawCircle(scaledRect.bottomLeft, 6, dotPaint);
-    canvas.drawCircle(scaledRect.bottomRight, 6, dotPaint);
-  }
-
-  @override
-  bool shouldRepaint(covariant SimpleBoxPainter oldDelegate) => true;
-}
-
 class ConfirmationScreen extends StatefulWidget {
   final String imagePath;
   final Rect? detectedRect;
@@ -858,6 +823,7 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                   child: Image.file(
                     File(_croppedPath ?? widget.imagePath),
                     key: ValueKey(_croppedPath),
+                    fit: BoxFit.contain,
                   ),
                 ),
                 if (_croppedPath == null && _openCvCorners != null)
@@ -873,6 +839,7 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                               child: CustomPaint(
                                 painter: SimplePolygonPainter(
                                   points: _openCvCorners!,
+                                  imageSize: snapshot.data!,
                                 ),
                               ),
                             );
@@ -968,42 +935,86 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
 
   Future<Size> _getImageSize(File file) async {
     final bytes = await file.readAsBytes();
-    final image = img.decodeImage(bytes);
+    final decoded = img.decodeImage(bytes);
+    final image = decoded == null ? null : img.bakeOrientation(decoded);
     return image == null
         ? const Size(0, 0)
         : Size(image.width.toDouble(), image.height.toDouble());
   }
 }
 
+/// Maps normalized (0–1) corner points onto the preview using [BoxFit.contain].
 class SimplePolygonPainter extends CustomPainter {
   final List<Offset> points;
-  SimplePolygonPainter({required this.points});
+  final Size? imageSize;
+
+  SimplePolygonPainter({required this.points, this.imageSize});
+
+  static Rect _containRect(Size canvasSize, Size sourceSize) {
+    if (sourceSize.width <= 0 || sourceSize.height <= 0) {
+      return Offset.zero & canvasSize;
+    }
+    final scale = math.min(
+      canvasSize.width / sourceSize.width,
+      canvasSize.height / sourceSize.height,
+    );
+    final width = sourceSize.width * scale;
+    final height = sourceSize.height * scale;
+    return Rect.fromLTWH(
+      (canvasSize.width - width) / 2,
+      (canvasSize.height - height) / 2,
+      width,
+      height,
+    );
+  }
+
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.greenAccent
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 3.0
-      ..strokeCap = StrokeCap.round;
     if (points.length < 4) return;
+
+    final fit = _containRect(size, imageSize ?? const Size(1, 1));
     final scaled = points
-        .map((point) => Offset(point.dx * size.width, point.dy * size.height))
+        .map(
+          (point) => Offset(
+            fit.left + point.dx * fit.width,
+            fit.top + point.dy * fit.height,
+          ),
+        )
         .toList();
+
+    final stroke = Paint()
+      ..color = const Color(0xFF7B61FF)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
     final path = Path()
       ..moveTo(scaled[0].dx, scaled[0].dy)
       ..lineTo(scaled[1].dx, scaled[1].dy)
       ..lineTo(scaled[2].dx, scaled[2].dy)
       ..lineTo(scaled[3].dx, scaled[3].dy)
       ..close();
-    canvas.drawPath(path, paint);
-    final dotPaint = Paint()..color = Colors.greenAccent;
-    for (var p in scaled) {
-      canvas.drawCircle(p, 6, dotPaint);
+
+    canvas.drawPath(path, stroke);
+
+    final dotPaint = Paint()..color = const Color(0xFF3DDC84);
+    for (final p in scaled) {
+      canvas.drawCircle(p, 7, dotPaint);
+      canvas.drawCircle(
+        p,
+        7,
+        Paint()
+          ..color = Colors.white
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2,
+      );
     }
   }
 
   @override
-  bool shouldRepaint(covariant SimplePolygonPainter oldDelegate) => true;
+  bool shouldRepaint(covariant SimplePolygonPainter oldDelegate) =>
+      oldDelegate.points != points || oldDelegate.imageSize != imageSize;
 }
 
 class ResultScreen extends StatelessWidget {

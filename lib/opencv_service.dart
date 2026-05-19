@@ -2,6 +2,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:image/image.dart' as img;
 import 'package:opencv_dart/opencv_dart.dart' as cv;
 
 class Detection {
@@ -31,7 +32,14 @@ class OpenCvService {
   /// Returns accurate 4 corner points
   Detection refineDetectionOnImage(Uint8List imageBytes) {
     try {
-      final mat = cv.imdecode(imageBytes, cv.IMREAD_COLOR);
+      final decoded = img.decodeImage(imageBytes);
+      if (decoded == null) {
+        return _emptyDetection();
+      }
+
+      final baked = img.bakeOrientation(decoded);
+      final orientedBytes = Uint8List.fromList(img.encodeJpg(baked, quality: 92));
+      final mat = cv.imdecode(orientedBytes, cv.IMREAD_COLOR);
 
       if (mat.isEmpty) {
         return _emptyDetection();
@@ -68,7 +76,7 @@ class OpenCvService {
       // 4. EDGE DETECTION
       // =========================================================
 
-      final edges = cv.canny(blurred, 80, 180);
+      final edges = cv.canny(blurred, 50, 150);
 
       // =========================================================
       // 5. CLOSE GAPS
@@ -184,7 +192,11 @@ class OpenCvService {
     List<Offset> normalizedCorners,
   ) {
     try {
-      final mat = cv.imdecode(imageBytes, cv.IMREAD_COLOR);
+      final decoded = img.decodeImage(imageBytes);
+      if (decoded == null) return null;
+      final baked = img.bakeOrientation(decoded);
+      final orientedBytes = Uint8List.fromList(img.encodeJpg(baked, quality: 92));
+      final mat = cv.imdecode(orientedBytes, cv.IMREAD_COLOR);
 
       if (mat.isEmpty) {
         return null;
@@ -281,10 +293,10 @@ class OpenCvService {
 
   Detection _emptyDetection() {
     return Detection(
-      left: 0.1,
-      top: 0.1,
-      right: 0.9,
-      bottom: 0.9,
+      left: 0,
+      top: 0,
+      right: 0,
+      bottom: 0,
       score: 0.0,
       corners: null,
     );
