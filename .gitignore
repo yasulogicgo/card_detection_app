@@ -1,3 +1,11 @@
+# Local API secrets (never commit)
+env.json
+.env
+.env.*
+!.env.example
+secrets.json
+**/api_config.local.dart
+
 # Miscellaneous
 *.class
 *.log

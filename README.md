@@ -1,30 +1,43 @@
 # card_detacstion_app
 
-A new Flutter project.
+Flutter card detection app with camera, OpenCV crop, and Hugging Face API.
 
-## Hugging Face API token (card detection)
+## One-time setup (API token — do this once)
 
-The app calls the Space at `detect-card` and may send `Authorization: Bearer …`
-only when a token is provided. **Do not put tokens in source control.**
+GitHub **blocks pushes** if a Hugging Face token (`hf_...`) is in any commit.  
+Keep the token only in a **local file** that git never tracks.
 
-Run locally:
+### Windows (PowerShell)
 
-```bash
-flutter run --dart-define=HF_API_TOKEN=your_hf_token
+```powershell
+cd C:\Users\yasu.v.lakhani\StudioProjects\card_detacstion_app
+.\scripts\setup.ps1
 ```
 
-If a token was ever committed, **revoke it** in your Hugging Face account and create a new one.
+Then open **`env.json`** (created from `env.json.example`) and replace `paste_your_hf_token_here` with your real token.
+
+### Run the app
+
+- **VS Code / Cursor**: use launch config **"card_detacstion_app (with API token)"** (uses `env.json` automatically)
+- **Terminal**:
+
+```powershell
+.\scripts\run.ps1
+```
+
+or:
+
+```bash
+flutter run --dart-define-from-file=env.json
+```
+
+### Git push
+
+After setup, a **pre-commit hook** stops you from committing `hf_` tokens by mistake.  
+You can push normally — `env.json` is in `.gitignore` and will not be uploaded.
+
+If a token was ever committed before, **revoke it** on [Hugging Face → Access Tokens](https://huggingface.co/settings/tokens) and use a new one in `env.json` only.
 
 ## Getting Started
 
-This project is a starting point for a Flutter application.
-
-A few resources to get you started if this is your first Flutter project:
-
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+- [Flutter documentation](https://docs.flutter.dev/)
