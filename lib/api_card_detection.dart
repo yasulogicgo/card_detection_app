@@ -1,3 +1,4 @@
+import 'package:card_detacstion_app/api_config.dart';
 import 'package:flutter/material.dart';
 
 /// Parsed card geometry + match info from `/detect-card-box` API `data` object.
@@ -74,7 +75,7 @@ class ApiCardDetection {
     if (rawUrl != null && rawUrl.isNotEmpty) {
       annotatedUrl = rawUrl.startsWith('http')
           ? rawUrl
-          : 'https://vidhilogicgo-card-detection.hf.space$rawUrl';
+          : '$kHfSpaceBaseUrl$rawUrl';
     }
 
     return ApiCardDetection(

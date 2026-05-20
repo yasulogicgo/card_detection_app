@@ -1,11 +1,15 @@
-/// Hugging Face Space API settings.
+/// Hugging Face Space API (from gitignored `env.json` via --dart-define-from-file).
 ///
-/// Token is **not** stored in this repo. One-time setup:
-/// 1. Run `scripts/setup.ps1` (creates gitignored `env.json`)
-/// 2. Paste your token into `env.json`
-/// 3. Run with `--dart-define-from-file=env.json` (VS Code launch config does this)
-const String kDetectCardEndpoint =
-    'https://vidhilogicgo-card-detection.hf.space/detect-card';
+/// Setup: `scripts/setup.ps1` then edit `env.json`.
+const String kHfSpaceBaseUrl = String.fromEnvironment(
+  'HF_SPACE_BASE_URL',
+  defaultValue: 'https://vidhilogicgo-card-detection.hf.space',
+);
+
+const String kDetectCardEndpoint = String.fromEnvironment(
+  'HF_DETECT_CARD_ENDPOINT',
+  defaultValue: 'https://vidhilogicgo-card-detection.hf.space/detect-card',
+);
 
 const String kHfApiToken = String.fromEnvironment(
   'HF_API_TOKEN',

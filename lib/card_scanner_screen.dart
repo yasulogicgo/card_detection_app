@@ -13,7 +13,7 @@ import 'package:http_parser/http_parser.dart';
 import 'package:image/image.dart' as img;
 import 'package:path_provider/path_provider.dart';
 import 'package:card_detacstion_app/api_card_detection.dart';
-import 'package:card_detacstion_app/api_config.dart';
+import 'package:card_detacstion_app/api_client.dart';
 import 'package:card_detacstion_app/card_corner_detector.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 
@@ -1332,7 +1332,11 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
       });
       _startApiProgressTimer();
 
-      final upload = await _uploadImage(imageToUpload);
+      final upload = await const CardDetectionApiClient().detectCard(imageToUpload);
+      debugPrint(
+        'API (${upload.elapsedMs}ms, HTTP ${upload.statusCode}): '
+        '${upload.body['message'] ?? upload.body['success']}',
+      );
       _finishApiProgress(upload.elapsedMs);
       await Future<void>.delayed(const Duration(milliseconds: 400));
       if (!mounted) return;
@@ -1385,35 +1389,6 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
         if (_isApiCalling) _clearApiProgress();
       }
     }
-  }
-
-  Future<({Map<String, dynamic> body, int elapsedMs})> _uploadImage(
-    File imageFile,
-  ) async {
-    final sw = Stopwatch()..start();
-    final req = http.MultipartRequest('POST', Uri.parse(kDetectCardEndpoint));
-    if (kHfApiToken.isNotEmpty)
-      req.headers['Authorization'] = 'Bearer $kHfApiToken';
-    req.files.add(
-      await http.MultipartFile.fromPath(
-        'file',
-        imageFile.path,
-        contentType: MediaType('image', 'jpeg'),
-      ),
-    );
-    final res = await http.Response.fromStream(await req.send());
-    sw.stop();
-    debugPrint('API (${sw.elapsedMilliseconds}ms): ${res.body}');
-    Map<String, dynamic> body;
-    if (res.statusCode == 200) {
-      final decoded = json.decode(res.body);
-      body = decoded is Map<String, dynamic>
-          ? decoded
-          : {'success': false, 'message': 'Invalid response'};
-    } else {
-      body = {'success': false, 'message': 'Server error ${res.statusCode}'};
-    }
-    return (body: body, elapsedMs: sw.elapsedMilliseconds);
   }
 
   void _setGuideRectsAroundCard({
