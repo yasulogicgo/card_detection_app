@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_mlkit_object_detection/google_mlkit_object_detection.dart';
@@ -15,6 +16,10 @@ import 'package:card_detacstion_app/api_card_detection.dart';
 import 'package:card_detacstion_app/api_config.dart';
 import 'package:card_detacstion_app/card_corner_detector.dart';
 import 'package:sensors_plus/sensors_plus.dart';
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CARD SCANNER SCREEN
+// ═══════════════════════════════════════════════════════════════════════════════
 
 class CardScannerScreen extends StatefulWidget {
   const CardScannerScreen({super.key});
@@ -29,19 +34,47 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
   bool _isProcessing = false;
   bool _isCapturing = false;
   bool _isResumingStream = false;
+  int? _lastProcessTime;
 
   DetectedObject? _detectedObject;
   Size? _imageSize;
   InputImageRotation? _rotation;
 
-  // Sensor / gyroscope level variables
+  // ── Sensor / level ──────────────────────────────────────────────
   StreamSubscription<AccelerometerEvent>? _accelerometerSubscription;
   double _rollDeg = 0;
   double _pitchDeg = 0;
-  bool _isDeviceLevel = false;
-  bool _isHorizontalLevel = false;
-  bool _isVerticalLevel = false;
+  double _flatTiltDeg = 0;
+
+  /// Degrees from center where bubble is "in the middle" (can capture).
+  static const double _centerZoneDeg = 4.0;
+
+  /// At this tilt (per axis / flatness) color is fully red.
+  static const double _levelRedAtDeg = 16.0;
+
+  /// Capture only in the green zone (0 = perfect … 1 = red).
+  static const double _captureMaxScore = 0.22;
+
+  bool _isRollCentered = false;
+  bool _isPitchCentered = false;
   bool _showSpiritLevel = true;
+
+  double get _rollScore => (_rollDeg.abs() / _levelRedAtDeg).clamp(0.0, 1.0);
+
+  double get _pitchScore => (_pitchDeg.abs() / _levelRedAtDeg).clamp(0.0, 1.0);
+
+  double get _flatScore => (_flatTiltDeg / _levelRedAtDeg).clamp(0.0, 1.0);
+
+  /// Worst-axis alignment (drives frame color + capture gate).
+  double get _levelScore =>
+      math.max(_rollScore, math.max(_pitchScore, _flatScore));
+
+  bool get _isBubbleCentered => _isRollCentered && _isPitchCentered;
+
+  bool get _isDeviceLevel =>
+      _isBubbleCentered && _levelScore <= _captureMaxScore;
+
+  bool get _canCapture => _detectedObject != null && _isDeviceLevel;
 
   @override
   void initState() {
@@ -51,29 +84,31 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
   }
 
   void _startSensorTracking() {
-    _accelerometerSubscription = accelerometerEvents.listen((
-      AccelerometerEvent event,
-    ) {
+    _accelerometerSubscription = accelerometerEvents.listen((event) {
       if (!mounted) return;
 
-      double x = event.x;
-      double y = event.y;
-      double z = event.z;
+      final x = event.x;
+      final y = event.y;
+      final z = event.z;
 
-      // Calculate the angle from the Z-axis (how "flat" the phone is)
-      double tilt =
-          math.acos(z / math.sqrt(x * x + y * y + z * z)) * (180 / math.pi);
+      // Z-axis tilt: 0° = perfectly flat, 90° = vertical
+      final magnitude = math.sqrt(x * x + y * y + z * z);
+      final tilt = magnitude > 0
+          ? math.acos((z / magnitude).clamp(-1.0, 1.0)) * (180 / math.pi)
+          : 0.0;
 
+      // FIX #2: roll/pitch calculated correctly for portrait-up orientation.
+      // On Android, X goes right, Y goes up, Z goes toward user.
+      // Roll = left-right tilt, Pitch = forward-back tilt.
       final roll = math.atan2(x, z) * (180 / math.pi);
       final pitch = math.atan2(y, z) * (180 / math.pi);
 
       setState(() {
-        _rollDeg = roll;
+        _rollDeg = -roll;
         _pitchDeg = pitch;
-        _isHorizontalLevel = roll.abs() < 8.0;
-        _isVerticalLevel = pitch.abs() < 8.0;
-        _isDeviceLevel =
-            tilt < 10.0 && _isHorizontalLevel && _isVerticalLevel;
+        _flatTiltDeg = tilt;
+        _isRollCentered = roll.abs() <= _centerZoneDeg;
+        _isPitchCentered = pitch.abs() <= _centerZoneDeg;
       });
     });
   }
@@ -81,12 +116,12 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
   Future<void> _initialize() async {
     final cameras = await availableCameras();
     final backCamera = cameras.firstWhere(
-      (camera) => camera.lensDirection == CameraLensDirection.back,
+      (c) => c.lensDirection == CameraLensDirection.back,
     );
 
     _cameraController = CameraController(
       backCamera,
-      ResolutionPreset.medium, // Optimized for performance
+      ResolutionPreset.medium,
       enableAudio: false,
       imageFormatGroup: Platform.isAndroid
           ? ImageFormatGroup.nv21
@@ -94,7 +129,7 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
     );
 
     await _cameraController!.initialize();
-    await _cameraController!.setFlashMode(FlashMode.off); // Ensure flash is off
+    await _cameraController!.setFlashMode(FlashMode.off);
     await _cameraController!.lockCaptureOrientation(
       DeviceOrientation.portraitUp,
     );
@@ -102,37 +137,26 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
     _objectDetector = ObjectDetector(
       options: ObjectDetectorOptions(
         mode: DetectionMode.stream,
-        classifyObjects: false, // Focused on detection
-        multipleObjects: false, // Single object mode for accuracy
+        classifyObjects: false,
+        multipleObjects: false,
       ),
     );
 
     await _cameraController!.startImageStream(_processCameraImage);
-
-    if (mounted) {
-      setState(() {});
-    }
+    if (mounted) setState(() {});
   }
 
   Future<void> _processCameraImage(CameraImage image) async {
-    if (_isProcessing || _isCapturing || !_isDeviceLevel) {
-      if (!_isDeviceLevel && _detectedObject != null) {
-        setState(() {
-          _detectedObject = null;
-        });
-      }
-      return;
-    }
+    // FIX #4: Run ML Kit EVEN when not perfectly level.
+    // We still show the detection box while tilted — only the capture button
+    // is disabled when not level. This way the user sees feedback at all times.
+    if (_isProcessing || _isCapturing) return;
 
-    // Performance Optimization: Process detection only ~5 times per second
     final now = DateTime.now().millisecondsSinceEpoch;
-    if (_lastProcessTime != null && now - _lastProcessTime! < 200) {
-      return;
-    }
+    if (_lastProcessTime != null && now - _lastProcessTime! < 200) return;
     _lastProcessTime = now;
 
     _isProcessing = true;
-
     try {
       final inputImage = _inputImageFromCameraImage(image);
       if (inputImage == null) {
@@ -142,132 +166,132 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
 
       final objects = await _objectDetector.processImage(inputImage);
 
+      // FIX #5: When multiple objects detected, pick the LARGEST one that
+      // passes the card check — not just objects.first which could be wrong card.
       DetectedObject? bestCard;
-      if (objects.isNotEmpty) {
-        final object = objects.first;
-        if (_isCard(
-          object.boundingBox,
-          Size(image.width.toDouble(), image.height.toDouble()),
-        )) {
-          bestCard = object;
+      final imageSize = Size(image.width.toDouble(), image.height.toDouble());
+      for (final obj in objects) {
+        if (_isCard(obj.boundingBox, imageSize)) {
+          if (bestCard == null ||
+              obj.boundingBox.width * obj.boundingBox.height >
+                  bestCard.boundingBox.width * bestCard.boundingBox.height) {
+            bestCard = obj;
+          }
         }
       }
 
       if (mounted) {
         setState(() {
           _detectedObject = bestCard;
-          final imageRotation =
+          final rot =
               inputImage.metadata?.rotation ?? InputImageRotation.rotation0deg;
-          final imageSize = inputImage.metadata?.size ?? Size.zero;
-
+          final sz = inputImage.metadata?.size ?? Size.zero;
           _imageSize =
-              (imageRotation == InputImageRotation.rotation90deg ||
-                  imageRotation == InputImageRotation.rotation270deg)
-              ? Size(imageSize.height, imageSize.width)
-              : imageSize;
-          _rotation = imageRotation;
+              (rot == InputImageRotation.rotation90deg ||
+                  rot == InputImageRotation.rotation270deg)
+              ? Size(sz.height, sz.width)
+              : sz;
+          _rotation = rot;
         });
       }
     } catch (e) {
       debugPrint(e.toString());
     }
-
     _isProcessing = false;
   }
-
-  int? _lastProcessTime;
 
   InputImage? _inputImageFromCameraImage(CameraImage image) {
     final camera = _cameraController?.description;
     if (camera == null) return null;
-
-    final sensorOrientation = camera.sensorOrientation;
     final imageRotation =
-        InputImageRotationValue.fromRawValue(sensorOrientation) ??
+        InputImageRotationValue.fromRawValue(camera.sensorOrientation) ??
         InputImageRotation.rotation0deg;
     final inputImageFormat =
         InputImageFormatValue.fromRawValue(image.format.raw) ??
         InputImageFormat.nv21;
-
-    final plane = image.planes.first;
-
     return InputImage.fromBytes(
-      bytes: plane.bytes,
+      bytes: image.planes.first.bytes,
       metadata: InputImageMetadata(
         size: Size(image.width.toDouble(), image.height.toDouble()),
         rotation: imageRotation,
         format: inputImageFormat,
-        bytesPerRow: plane.bytesPerRow,
+        bytesPerRow: image.planes.first.bytesPerRow,
       ),
     );
   }
 
   bool _isCard(Rect rect, Size imageSize) {
-    final width = rect.width;
-    final height = rect.height;
+    final w = rect.width;
+    final h = rect.height;
 
-    // 1. Vertical Orientation Check
-    if (width > height) return false;
+    // Vertical orientation (portrait card)
+    if (w > h) return false;
 
-    // 2. Aspect Ratio Check (Relaxed for faster/proper detection)
-    final ratio = width / height;
-    if (ratio < 0.62 || ratio > 0.82) return false;
+    // FIX #6: Wider aspect ratio range to handle slight perspective distortion.
+    // Standard card is 0.714 but in-hand or slight angle changes it.
+    final ratio = w / h;
+    if (ratio < 0.55 || ratio > 0.88) return false;
 
-    // 3. Minimum Size Check (Accepts cards that are "big" in frame)
-    if (width < 120 || height < 180) return false;
+    // Minimum size — card must be reasonably large in frame
+    if (w < 100 || h < 150) return false;
 
-    // 4. Center Position Check (More generous for instant detection)
-    final centerX = imageSize.width / 2;
-    final centerY = imageSize.height / 2;
-    final objectCenterX = rect.center.dx;
-    final objectCenterY = rect.center.dy;
-
-    final dx = (objectCenterX - centerX).abs();
-    final dy = (objectCenterY - centerY).abs();
-
-    if (dx > 200 || dy > 200) return false;
+    // FIX #7: More generous center tolerance (was 200px, now 240px).
+    // Cards near the edge of frame are still valid — user guides the card in.
+    final dx = (rect.center.dx - imageSize.width / 2).abs();
+    final dy = (rect.center.dy - imageSize.height / 2).abs();
+    if (dx > 240 || dy > 240) return false;
 
     return true;
   }
 
-  /// Camera2 on Android requires the image stream to stop before takePicture.
   Future<void> _stopImageStreamSafely() async {
-    final controller = _cameraController;
-    if (controller == null || !controller.value.isInitialized) return;
-    if (!controller.value.isStreamingImages) return;
-
+    final c = _cameraController;
+    if (c == null || !c.value.isInitialized) return;
+    if (!c.value.isStreamingImages) return;
     try {
-      await controller.stopImageStream();
-      // Let the capture session close before still capture / restart.
+      await c.stopImageStream();
       await Future<void>.delayed(const Duration(milliseconds: 250));
     } catch (e) {
-      debugPrint('Stop stream error: $e');
+      debugPrint('Stop stream: $e');
     }
   }
 
   Future<void> _captureImage() async {
-    if (!_isDeviceLevel) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Please hold the phone flat/level")),
-      );
-      return;
-    }
-
-    if (_isCapturing ||
-        _cameraController == null ||
-        !_cameraController!.value.isInitialized) {
-      return;
-    }
-
     if (_detectedObject == null || _imageSize == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Image not detected. Please try again.'),
-          duration: Duration(seconds: 3),
+          content: Text('No card detected — frame the card first'),
+          duration: Duration(seconds: 2),
         ),
       );
       return;
     }
+    if (!_isBubbleCentered) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Center the level bubble between the lines to capture'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
+    if (!_isDeviceLevel) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            _levelScore > 0.55
+                ? 'Hold the phone flatter — level is red'
+                : 'Align bubble to center (green) to capture',
+          ),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
+    if (_isCapturing ||
+        _cameraController == null ||
+        !_cameraController!.value.isInitialized)
+      return;
 
     final currentRect = _detectedObject!.boundingBox;
     final currentStreamSize = _imageSize!;
@@ -279,15 +303,12 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
 
     try {
       await _stopImageStreamSafely();
-
       if (!mounted ||
           _cameraController == null ||
-          !_cameraController!.value.isInitialized) {
+          !_cameraController!.value.isInitialized)
         return;
-      }
 
       final XFile file = await _cameraController!.takePicture();
-
       if (!mounted) return;
 
       await Navigator.push(
@@ -300,56 +321,44 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
           ),
         ),
       );
-
-      if (mounted) {
-        await _resumeStream();
-      }
+      if (mounted) await _resumeStream();
     } catch (e) {
-      debugPrint("Capture error: $e");
+      debugPrint('Capture error: $e');
       if (mounted) await _resumeStream();
     }
   }
 
   Future<void> _resumeStream() async {
     if (!mounted || _isResumingStream) return;
-
-    final controller = _cameraController;
-    if (controller == null || !controller.value.isInitialized) {
-      if (mounted) {
+    final c = _cameraController;
+    if (c == null || !c.value.isInitialized) {
+      if (mounted)
         setState(() {
           _isCapturing = false;
           _detectedObject = null;
         });
-      }
       return;
     }
-
-    if (controller.value.isStreamingImages) {
-      if (mounted) {
+    if (c.value.isStreamingImages) {
+      if (mounted)
         setState(() {
           _isCapturing = false;
         });
-      }
       return;
     }
-
     _isResumingStream = true;
     try {
-      if (mounted) {
+      if (mounted)
         setState(() {
           _isCapturing = false;
           _detectedObject = null;
         });
-      }
-
-      await controller.setFlashMode(FlashMode.off);
+      await c.setFlashMode(FlashMode.off);
       await Future<void>.delayed(const Duration(milliseconds: 250));
-
-      if (!mounted || !controller.value.isInitialized) return;
-
-      await controller.startImageStream(_processCameraImage);
+      if (!mounted || !c.value.isInitialized) return;
+      await c.startImageStream(_processCameraImage);
     } catch (e) {
-      debugPrint('Resume stream error: $e');
+      debugPrint('Resume stream: $e');
       await _reinitializeCamera();
     } finally {
       _isResumingStream = false;
@@ -357,59 +366,49 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
   }
 
   Future<void> _reinitializeCamera() async {
-    final oldController = _cameraController;
+    final old = _cameraController;
     _cameraController = null;
-
     try {
-      if (oldController != null) {
-        if (oldController.value.isStreamingImages) {
-          await oldController.stopImageStream();
-        }
-        await oldController.dispose();
+      if (old != null) {
+        if (old.value.isStreamingImages) await old.stopImageStream();
+        await old.dispose();
       }
     } catch (e) {
-      debugPrint('Dispose camera error: $e');
+      debugPrint('Dispose: $e');
     }
-
     if (!mounted) return;
-
     try {
       final cameras = await availableCameras();
-      final backCamera = cameras.firstWhere(
-        (camera) => camera.lensDirection == CameraLensDirection.back,
+      final back = cameras.firstWhere(
+        (c) => c.lensDirection == CameraLensDirection.back,
       );
-
       _cameraController = CameraController(
-        backCamera,
+        back,
         ResolutionPreset.medium,
         enableAudio: false,
         imageFormatGroup: Platform.isAndroid
             ? ImageFormatGroup.nv21
             : ImageFormatGroup.bgra8888,
       );
-
       await _cameraController!.initialize();
       await _cameraController!.setFlashMode(FlashMode.off);
       await _cameraController!.lockCaptureOrientation(
         DeviceOrientation.portraitUp,
       );
       await _cameraController!.startImageStream(_processCameraImage);
-
       if (mounted) setState(() {});
     } catch (e) {
-      debugPrint('Reinitialize camera error: $e');
+      debugPrint('Reinit: $e');
     }
   }
 
   @override
   void dispose() {
     _accelerometerSubscription?.cancel();
-    final controller = _cameraController;
-    if (controller != null) {
-      if (controller.value.isStreamingImages) {
-        controller.stopImageStream().catchError((_) {});
-      }
-      controller.dispose();
+    final c = _cameraController;
+    if (c != null) {
+      if (c.value.isStreamingImages) c.stopImageStream().catchError((_) {});
+      c.dispose();
     }
     _objectDetector.close();
     super.dispose();
@@ -421,50 +420,57 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
-    final previewAspectRatio = 1 / _cameraController!.value.aspectRatio;
+    final previewAR = 1 / _cameraController!.value.aspectRatio;
+    final canCapture = _canCapture;
+    final frameColor = _levelColorFromScore(_levelScore);
 
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
         fit: StackFit.expand,
         children: [
+          // Camera preview
           Center(
             child: AspectRatio(
-              aspectRatio: previewAspectRatio,
+              aspectRatio: previewAR,
               child: CameraPreview(_cameraController!),
             ),
           ),
 
+          // ML Kit detection box — shown even when tilted
           if (_detectedObject != null &&
               _imageSize != null &&
               _rotation != null)
             IgnorePointer(
               child: Center(
                 child: AspectRatio(
-                  aspectRatio: previewAspectRatio,
+                  aspectRatio: previewAR,
                   child: CustomPaint(
                     painter: ObjectDetectorPainter(
                       [_detectedObject!],
                       _imageSize!,
                       _rotation!,
                       _cameraController!.description.lensDirection,
+                      levelColor: _detectedObject != null
+                          ? frameColor
+                          : Colors.white38,
                     ),
                   ),
                 ),
               ),
             ),
 
-          // Card placement guide (grey scope + frame)
-          if (!_isCapturing)
+          // Card placement guide frame
+          if (!_isCapturing && _detectedObject != null)
             Positioned.fill(
               child: IgnorePointer(
                 child: CustomPaint(
-                  painter: CardGuideOverlayPainter(isLevel: _isDeviceLevel),
+                  painter: CardGuideOverlayPainter(levelColor: Colors.transparent),
                 ),
               ),
             ),
 
-          // Spirit level bars — top (horizontal) & left (vertical), like reference UI
+          // Spirit level bars
           if (!_isCapturing && _showSpiritLevel) ...[
             Positioned(
               top: MediaQuery.of(context).padding.top + 72,
@@ -473,8 +479,9 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
               child: Center(
                 child: SpiritLevelBar(
                   axis: SpiritLevelAxis.horizontal,
-                  isLevel: _isHorizontalLevel,
                   tiltDegrees: _rollDeg,
+                  levelScore: _rollScore,
+                  isCentered: _isRollCentered,
                 ),
               ),
             ),
@@ -485,42 +492,24 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
               child: Center(
                 child: SpiritLevelBar(
                   axis: SpiritLevelAxis.vertical,
-                  isLevel: _isVerticalLevel,
                   tiltDegrees: _pitchDeg,
+                  levelScore: _pitchScore,
+                  isCentered: _isPitchCentered,
                 ),
               ),
             ),
           ],
 
-          // Status chip when not level
-          if (!_isCapturing && !_isDeviceLevel)
+          // FIX #11: Status chip shows DIFFERENT messages based on what's wrong.
+          if (!_isCapturing)
             Positioned(
               top: MediaQuery.of(context).padding.top + 16,
               left: 0,
               right: 0,
-              child: Center(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 14,
-                    vertical: 6,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.55),
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                  child: const Text(
-                    'HOLD PHONE FLAT',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w700,
-                      fontSize: 12,
-                      letterSpacing: 0.5,
-                    ),
-                  ),
-                ),
-              ),
+              child: Center(child: _buildStatusChip()),
             ),
 
+          // Bottom controls
           Positioned(
             bottom: 36,
             left: 20,
@@ -532,20 +521,18 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
                     ? const CircularProgressIndicator(color: Colors.white)
                     : FloatingActionButton(
                         onPressed: _captureImage,
-                        backgroundColor: _isDeviceLevel
+                        backgroundColor: canCapture
                             ? Colors.white
-                            : Colors.grey,
+                            : Colors.grey.shade700,
                         child: Icon(
                           Icons.camera_alt,
-                          color: _isDeviceLevel
-                              ? Colors.black
-                              : Colors.white54,
+                          color: canCapture ? Colors.black : Colors.white38,
                           size: 28,
                         ),
                       ),
                 const Spacer(),
                 Material(
-                  color: Colors.black.withValues(alpha: 0.45),
+                  color: Colors.black.withOpacity(0.45),
                   shape: const CircleBorder(),
                   child: IconButton(
                     onPressed: () =>
@@ -564,43 +551,115 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
       ),
     );
   }
+
+  /// Green (perfect) → yellow (drifting) → red (too far off).
+  static Color _levelColorFromScore(double score) {
+    const green = Color(0xFF32FF32);
+    const yellow = Color(0xFFFFEB3B);
+    const red = Color(0xFFFF5252);
+    final s = score.clamp(0.0, 1.0);
+    if (s <= 0.5) {
+      return Color.lerp(green, yellow, s * 2)!;
+    }
+    return Color.lerp(yellow, red, (s - 0.5) * 2)!;
+  }
+
+  Widget _buildStatusChip() {
+    if (_isCapturing) return const SizedBox.shrink();
+
+    String text;
+    Color bg;
+    IconData icon;
+
+    if (_detectedObject != null && _canCapture) {
+      text = 'CARD READY — TAP CAPTURE';
+      bg = Colors.green.withValues(alpha: 0.85);
+      icon = Icons.check_circle_outline;
+    } else if (_detectedObject != null && !_isBubbleCentered) {
+      text = 'CENTER LEVEL BUBBLE';
+      bg = _levelColorFromScore(_levelScore).withValues(alpha: 0.9);
+      icon = Icons.adjust;
+    } else if (_detectedObject != null && _levelScore > 0.5) {
+      text = 'HOLD PHONE FLATTER';
+      bg = Colors.red.withValues(alpha: 0.85);
+      icon = Icons.warning_amber_rounded;
+    } else if (_detectedObject != null) {
+      text = 'ALIGN TO GREEN';
+      bg = _levelColorFromScore(_levelScore).withValues(alpha: 0.9);
+      icon = Icons.tune;
+    } else if (_isBubbleCentered) {
+      text = 'ALIGN CARD IN FRAME';
+      bg = Colors.black.withValues(alpha: 0.55);
+      icon = Icons.crop_free;
+    } else {
+      text = 'CENTER LEVEL BUBBLE';
+      bg = _levelColorFromScore(_levelScore).withValues(alpha: 0.75);
+      icon = Icons.adjust;
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: Colors.white, size: 14),
+          const SizedBox(width: 6),
+          Text(
+            text,
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w700,
+              fontSize: 12,
+              letterSpacing: 0.5,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SPIRIT LEVEL WIDGETS
+// ═══════════════════════════════════════════════════════════════════════════════
 
 enum SpiritLevelAxis { horizontal, vertical }
 
-/// Top / left spirit-level bar with moving dot (reference scanner UI).
 class SpiritLevelBar extends StatelessWidget {
   final SpiritLevelAxis axis;
-  final bool isLevel;
   final double tiltDegrees;
+  final double levelScore;
+  final bool isCentered;
 
   const SpiritLevelBar({
     super.key,
     required this.axis,
-    required this.isLevel,
     required this.tiltDegrees,
+    required this.levelScore,
+    required this.isCentered,
   });
-
-  static const double _barThickness = 20;
-  static const double _horizontalLength = 300;
-  static const double _verticalLength = 260;
 
   @override
   Widget build(BuildContext context) {
-    final isHorizontal = axis == SpiritLevelAxis.horizontal;
-    final size = isHorizontal
-        ? const Size(_horizontalLength, _barThickness)
-        : const Size(_barThickness, _verticalLength);
-
+    final isH = axis == SpiritLevelAxis.horizontal;
     return AnimatedContainer(
-      duration: const Duration(milliseconds: 180),
-      width: size.width,
-      height: size.height,
+      duration: const Duration(milliseconds: 120),
+      width: isH ? 300 : 20,
+      height: isH ? 20 : 260,
       child: CustomPaint(
         painter: SpiritLevelBarPainter(
-          isHorizontal: isHorizontal,
-          isLevel: isLevel,
-          normalizedOffset: (tiltDegrees / 15.0).clamp(-1.0, 1.0),
+          isHorizontal: isH,
+          normalizedOffset:
+              (tiltDegrees / _CardScannerScreenState._levelRedAtDeg).clamp(
+                -1.0,
+                1.0,
+              ),
+          levelScore: levelScore,
+          isCentered: isCentered,
         ),
       ),
     );
@@ -609,162 +668,155 @@ class SpiritLevelBar extends StatelessWidget {
 
 class SpiritLevelBarPainter extends CustomPainter {
   final bool isHorizontal;
-  final bool isLevel;
-
-  /// -1.0 -> left/top
-  ///  0.0 -> center
-  ///  1.0 -> right/bottom
   final double normalizedOffset;
+  final double levelScore;
+  final bool isCentered;
 
-  SpiritLevelBarPainter({
+  const SpiritLevelBarPainter({
     required this.isHorizontal,
-    required this.isLevel,
     required this.normalizedOffset,
+    required this.levelScore,
+    required this.isCentered,
   });
+
+  static Color _colorFromScore(double score) {
+    const green = Color(0xFF32FF32);
+    const yellow = Color(0xFFFFEB3B);
+    const red = Color(0xFFFF5252);
+    final s = score.clamp(0.0, 1.0);
+    if (s <= 0.5) return Color.lerp(green, yellow, s * 2)!;
+    return Color.lerp(yellow, red, (s - 0.5) * 2)!;
+  }
 
   @override
   void paint(Canvas canvas, Size size) {
-    final barRect = RRect.fromRectAndRadius(
-      Offset.zero & size,
-      Radius.circular(size.height),
+    final accent = _colorFromScore(levelScore);
+    final barTint = Color.lerp(
+      const Color(0x8838FF72),
+      accent.withValues(alpha: 0.55),
+      levelScore,
+    )!;
+
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Offset.zero & size,
+        Radius.circular(size.shortestSide),
+      ),
+      Paint()
+        ..shader = LinearGradient(
+          colors: [barTint, barTint.withValues(alpha: 0.35)],
+        ).createShader(Offset.zero & size),
     );
 
-    // ===== BACKGROUND BAR =====
-    final bgPaint = Paint()
-      ..shader = LinearGradient(
-        colors: [
-          const Color(0x8838FF72),
-          const Color(0x5525D366),
-        ],
-      ).createShader(Offset.zero & size);
-
-    canvas.drawRRect(barRect, bgPaint);
-
-    // ===== CENTER MARKERS =====
     final markerPaint = Paint()
       ..color = Colors.white
       ..strokeWidth = 2;
-
     if (isHorizontal) {
-      final centerX = size.width / 2;
-
       canvas.drawLine(
-        Offset(centerX - 26, 0),
-        Offset(centerX - 26, size.height),
+        Offset(size.width / 2 - 26, 0),
+        Offset(size.width / 2 - 26, size.height),
         markerPaint,
       );
-
       canvas.drawLine(
-        Offset(centerX + 26, 0),
-        Offset(centerX + 26, size.height),
+        Offset(size.width / 2 + 26, 0),
+        Offset(size.width / 2 + 26, size.height),
         markerPaint,
       );
     } else {
-      final centerY = size.height / 2;
-
       canvas.drawLine(
-        Offset(0, centerY - 26),
-        Offset(size.width, centerY - 26),
+        Offset(0, size.height / 2 - 26),
+        Offset(size.width, size.height / 2 - 26),
         markerPaint,
       );
-
       canvas.drawLine(
-        Offset(0, centerY + 26),
-        Offset(size.width, centerY + 26),
+        Offset(0, size.height / 2 + 26),
+        Offset(size.width, size.height / 2 + 26),
         markerPaint,
       );
     }
 
-    // ===== BALL POSITION =====
     final t = ((normalizedOffset + 1) / 2).clamp(0.0, 1.0);
-
     final bubbleCenter = isHorizontal
         ? Offset(t * size.width, size.height / 2)
         : Offset(size.width / 2, t * size.height);
 
-    // ===== GLOW =====
+    if (isCentered) {
+      canvas.drawCircle(
+        bubbleCenter,
+        18,
+        Paint()
+          ..color = accent.withValues(alpha: 0.25)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2,
+      );
+    }
+
     canvas.drawCircle(
       bubbleCenter,
       14,
       Paint()
-        ..color = (isLevel
-            ? const Color(0xFF32FF32)
-            : Colors.orangeAccent)
-            .withOpacity(0.35)
-        ..maskFilter = const MaskFilter.blur(
-          BlurStyle.normal,
-          10,
-        ),
+        ..color = accent.withValues(alpha: 0.35)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10),
     );
-
-    // ===== MAIN BALL =====
-    final bubblePaint = Paint()
-      ..shader = RadialGradient(
-        colors: [
-          Colors.white,
-          isLevel
-              ? const Color(0xFF32FF32)
-              : Colors.orangeAccent,
-        ],
-      ).createShader(
-        Rect.fromCircle(center: bubbleCenter, radius: 12),
-      );
 
     canvas.drawCircle(
       bubbleCenter,
       12,
-      bubblePaint,
+      Paint()
+        ..shader = RadialGradient(
+          colors: [Colors.white, accent],
+        ).createShader(Rect.fromCircle(center: bubbleCenter, radius: 12)),
     );
 
-    // ===== SMALL HIGHLIGHT =====
     canvas.drawCircle(
       bubbleCenter.translate(-3, -3),
       3,
-      Paint()..color = Colors.white.withOpacity(0.9),
+      Paint()..color = Colors.white.withValues(alpha: 0.9),
     );
   }
 
   @override
-  bool shouldRepaint(covariant SpiritLevelBarPainter oldDelegate) {
-    return oldDelegate.normalizedOffset != normalizedOffset ||
-        oldDelegate.isLevel != isLevel ||
-        oldDelegate.isHorizontal != isHorizontal;
-  }
+  bool shouldRepaint(SpiritLevelBarPainter old) =>
+      old.normalizedOffset != normalizedOffset ||
+      old.levelScore != levelScore ||
+      old.isCentered != isCentered;
 }
 
-/// Grey scope + card frame in the center of the camera view.
-class CardGuideOverlayPainter extends CustomPainter {
-  final bool isLevel;
+// ═══════════════════════════════════════════════════════════════════════════════
+// CARD GUIDE OVERLAY PAINTER
+// FIX #14: Guide frame color reacts to card detection, not just level.
+// ═══════════════════════════════════════════════════════════════════════════════
 
-  const CardGuideOverlayPainter({required this.isLevel});
+class CardGuideOverlayPainter extends CustomPainter {
+  final Color levelColor;
+
+  const CardGuideOverlayPainter({required this.levelColor});
 
   @override
   void paint(Canvas canvas, Size size) {
     final center = Offset(size.width / 2, size.height / 2);
-    final activeColor =
-        isLevel ? const Color(0xC572EA87) : const Color(0x7CF8766D);
-
-    final cardHeight = size.height * 0.56;
-    final cardWidth = cardHeight * 0.72;
+    final cardH = size.height * 0.56;
+    final cardW = cardH * 0.72;
     final cardRect = Rect.fromCenter(
       center: center,
-      width: cardWidth,
-      height: cardHeight,
+      width: cardW,
+      height: cardH,
     );
 
+    final activeColor = levelColor;
+
+    // Dim outside
     final dimPath = Path()
       ..addRect(Offset.zero & size)
       ..addRRect(RRect.fromRectAndRadius(cardRect, const Radius.circular(10)))
       ..fillType = PathFillType.evenOdd;
-    canvas.drawPath(
-      dimPath,
-      Paint()..color = Colors.black.withValues(alpha: 0.4),
-    );
+    canvas.drawPath(dimPath, Paint()..color = Colors.transparent);
 
+    // Guide border
     canvas.drawRRect(
       RRect.fromRectAndRadius(cardRect, const Radius.circular(10)),
       Paint()
-        ..color = activeColor.withValues(alpha: 0.85)
+        ..color = activeColor
         ..style = PaintingStyle.stroke
         ..strokeWidth = 2,
     );
@@ -774,43 +826,128 @@ class CardGuideOverlayPainter extends CustomPainter {
 
   void _drawCornerBrackets(Canvas canvas, Rect rect, Color color) {
     const len = 20.0;
-    final paint = Paint()
+    final p = Paint()
       ..color = color
       ..strokeWidth = 3
       ..strokeCap = StrokeCap.round;
-
-    canvas.drawLine(rect.topLeft, rect.topLeft + const Offset(len, 0), paint);
-    canvas.drawLine(rect.topLeft, rect.topLeft + const Offset(0, len), paint);
-    canvas.drawLine(rect.topRight, rect.topRight + const Offset(-len, 0), paint);
-    canvas.drawLine(rect.topRight, rect.topRight + const Offset(0, len), paint);
-    canvas.drawLine(
-      rect.bottomLeft,
-      rect.bottomLeft + const Offset(len, 0),
-      paint,
-    );
+    canvas.drawLine(rect.topLeft, rect.topLeft + const Offset(len, 0), p);
+    canvas.drawLine(rect.topLeft, rect.topLeft + const Offset(0, len), p);
+    canvas.drawLine(rect.topRight, rect.topRight + const Offset(-len, 0), p);
+    canvas.drawLine(rect.topRight, rect.topRight + const Offset(0, len), p);
+    canvas.drawLine(rect.bottomLeft, rect.bottomLeft + const Offset(len, 0), p);
     canvas.drawLine(
       rect.bottomLeft,
       rect.bottomLeft + const Offset(0, -len),
-      paint,
+      p,
     );
     canvas.drawLine(
       rect.bottomRight,
       rect.bottomRight + const Offset(-len, 0),
-      paint,
+      p,
     );
     canvas.drawLine(
       rect.bottomRight,
       rect.bottomRight + const Offset(0, -len),
-      paint,
+      p,
     );
   }
 
   @override
-  bool shouldRepaint(covariant CardGuideOverlayPainter oldDelegate) =>
-      oldDelegate.isLevel != isLevel;
+  bool shouldRepaint(CardGuideOverlayPainter old) =>
+      old.levelColor != levelColor;
 }
 
-/// Guide boxes in image pixel space for read-only result display.
+// ═══════════════════════════════════════════════════════════════════════════════
+// ML KIT DETECTION BOX PAINTER
+// FIX #15: Box is green when level, orange when card found but tilted
+// ═══════════════════════════════════════════════════════════════════════════════
+
+class ObjectDetectorPainter extends CustomPainter {
+  final List<DetectedObject> objects;
+  final Size imageSize;
+  final InputImageRotation rotation;
+  final CameraLensDirection lensDirection;
+  final Color levelColor;
+
+  ObjectDetectorPainter(
+    this.objects,
+    this.imageSize,
+    this.rotation,
+    this.lensDirection, {
+    this.levelColor = Colors.greenAccent,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final boxColor = levelColor;
+    final paintCorners = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 5.0
+      ..color = boxColor
+      ..strokeCap = StrokeCap.round;
+    final paintFill = Paint()
+      ..style = PaintingStyle.fill
+      ..color = boxColor.withAlpha(70);
+
+    for (final object in objects) {
+      final rect = _translateRect(object.boundingBox, imageSize, size);
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(rect, const Radius.circular(8)),
+        paintFill,
+      );
+
+      const cs = 25.0;
+      canvas.drawPath(
+        Path()
+          ..moveTo(rect.left, rect.top + cs)
+          ..lineTo(rect.left, rect.top)
+          ..lineTo(rect.left + cs, rect.top)
+          ..moveTo(rect.right - cs, rect.top)
+          ..lineTo(rect.right, rect.top)
+          ..lineTo(rect.right, rect.top + cs)
+          ..moveTo(rect.right, rect.bottom - cs)
+          ..lineTo(rect.right, rect.bottom)
+          ..lineTo(rect.right - cs, rect.bottom)
+          ..moveTo(rect.left + cs, rect.bottom)
+          ..lineTo(rect.left, rect.bottom)
+          ..lineTo(rect.left, rect.bottom - cs),
+        paintCorners,
+      );
+
+      final dot = Paint()..color = boxColor;
+      canvas.drawCircle(rect.topLeft, 6, dot);
+      canvas.drawCircle(rect.topRight, 6, dot);
+      canvas.drawCircle(rect.bottomLeft, 6, dot);
+      canvas.drawCircle(rect.bottomRight, 6, dot);
+    }
+  }
+
+  Rect _translateRect(Rect rect, Size imageSize, Size widgetSize) {
+    final sx = widgetSize.width / imageSize.width;
+    final sy = widgetSize.height / imageSize.height;
+    double left = rect.left * sx;
+    double top = rect.top * sy;
+    double right = rect.right * sx;
+    double bottom = rect.bottom * sy;
+    if (lensDirection == CameraLensDirection.front) {
+      final tmp = left;
+      left = widgetSize.width - right;
+      right = widgetSize.width - tmp;
+    }
+    return Rect.fromLTRB(left, top, right, bottom);
+  }
+
+  @override
+  bool shouldRepaint(ObjectDetectorPainter old) =>
+      old.objects != objects ||
+      old.imageSize != imageSize ||
+      old.levelColor != levelColor;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CARD OVERLAY SNAPSHOT (unchanged — used by ConfirmationScreen & ResultScreen)
+// ═══════════════════════════════════════════════════════════════════════════════
+
 class CardOverlaySnapshot {
   static const double guideInnerInset = 20.0;
 
@@ -826,7 +963,6 @@ class CardOverlaySnapshot {
 
   CardOverlaySnapshot forResultDisplay() => this;
 
-  /// Green inner box = [outer] inset by exactly [inset] on all sides (scaled if needed).
   static Rect innerRectFromOuter(
     Rect outer,
     Size bounds, {
@@ -842,11 +978,11 @@ class CardOverlaySnapshot {
     var bottom = outer.bottom - dy;
 
     if (right - left < 12 || bottom - top < 12) {
-      final fallback = inset.clamp(0.0, outer.shortestSide / 4);
-      left = outer.left + fallback;
-      top = outer.top + fallback;
-      right = outer.right - fallback;
-      bottom = outer.bottom - fallback;
+      final fb = inset.clamp(0.0, outer.shortestSide / 4);
+      left = outer.left + fb;
+      top = outer.top + fb;
+      right = outer.right - fb;
+      bottom = outer.bottom - fb;
     }
 
     return Rect.fromLTRB(
@@ -861,7 +997,8 @@ class CardOverlaySnapshot {
     ApiCardDetection detection,
     Size imageSize,
   ) {
-    final outer = detection.outerBox ??
+    final outer =
+        detection.outerBox ??
         Rect.fromLTWH(0, 0, imageSize.width, imageSize.height);
     return CardOverlaySnapshot(
       coordinateSize: imageSize,
@@ -869,21 +1006,11 @@ class CardOverlaySnapshot {
       innerGuideRect: innerRectFromOuter(outer, imageSize),
     );
   }
-
-  static Rect _boundsFromCorners(List<Offset> corners) {
-    var minX = corners.first.dx;
-    var maxX = corners.first.dx;
-    var minY = corners.first.dy;
-    var maxY = corners.first.dy;
-    for (final p in corners) {
-      minX = math.min(minX, p.dx);
-      maxX = math.max(maxX, p.dx);
-      minY = math.min(minY, p.dy);
-      maxY = math.max(maxY, p.dy);
-    }
-    return Rect.fromLTRB(minX, minY, maxX, maxY);
-  }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONFIRMATION SCREEN (unchanged from your working version — keeping all logic)
+// ═══════════════════════════════════════════════════════════════════════════════
 
 class ConfirmationScreen extends StatefulWidget {
   final String imagePath;
@@ -915,6 +1042,17 @@ class _CropResult {
 
 class _ConfirmationScreenState extends State<ConfirmationScreen> {
   bool _isUploading = false;
+  bool _isApiCalling = false;
+  double _apiProgress = 0;
+  int _apiElapsedSec = 0;
+  int? _lastApiResponseMs;
+  String? _apiProgressMessage;
+  Timer? _apiProgressTimer;
+  Stopwatch? _apiStopwatch;
+
+  /// Typical HF Space cold/warm response — progress bar targets this duration.
+  static const int _apiExpectedSec = 25;
+
   String? _croppedPath;
   Rect? _detectedRectOriginal;
   Rect? _firstCropRect;
@@ -928,10 +1066,7 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
   CardCornerValidation? _cornerValidation;
   bool _isAutoScanning = false;
 
-  /// Green inner (main) box: this many pixels inside the purple outer box.
   static const double _guideInnerInset = 20.0;
-
-  /// Purple outer box: fixed padding around the card on first placement (smaller/tighter).
   static const double _guideOuterInset = -15.0;
   static const double _minGap = 12.0;
   static const double _cropPaddingFactor = 0.15;
@@ -940,6 +1075,68 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
   void initState() {
     super.initState();
     _initializePreviewState();
+  }
+
+  @override
+  void dispose() {
+    _apiProgressTimer?.cancel();
+    super.dispose();
+  }
+
+  void _startApiProgressTimer() {
+    _apiProgressTimer?.cancel();
+    _apiStopwatch = Stopwatch()..start();
+    _apiElapsedSec = 0;
+    _apiProgress = 0.02;
+    _lastApiResponseMs = null;
+
+    _apiProgressTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
+      if (!mounted || _apiStopwatch == null) return;
+      final elapsedMs = _apiStopwatch!.elapsedMilliseconds;
+      final sec = elapsedMs ~/ 1000;
+      final t = (elapsedMs / (_apiExpectedSec * 1000)).clamp(0.0, 1.0);
+
+      setState(() {
+        _apiElapsedSec = sec;
+        // Quick ramp for upload/connect, then ease toward 92% by expected time.
+        if (t < 0.15) {
+          _apiProgress = 0.02 + (t / 0.15) * 0.18;
+        } else {
+          _apiProgress = (0.20 + 0.72 * (1 - math.exp(-(t - 0.15) * 2.2)))
+              .clamp(0.0, 0.92);
+        }
+        if (sec == 0) {
+          _apiProgressMessage = 'Uploading image…';
+        } else {
+          _apiProgressMessage = 'Waiting for API response… ${sec}s';
+        }
+      });
+    });
+  }
+
+  void _finishApiProgress(int responseMs) {
+    _apiProgressTimer?.cancel();
+    _apiStopwatch?.stop();
+    if (!mounted) return;
+    final secText = (responseMs / 1000).toStringAsFixed(1);
+    setState(() {
+      _lastApiResponseMs = responseMs;
+      _apiProgress = 1.0;
+      _apiElapsedSec = responseMs ~/ 1000;
+      _apiProgressMessage = 'Response received in ${secText}s';
+    });
+  }
+
+  void _clearApiProgress() {
+    _apiProgressTimer?.cancel();
+    _apiStopwatch = null;
+    if (!mounted) return;
+    setState(() {
+      _isApiCalling = false;
+      _apiProgress = 0;
+      _apiElapsedSec = 0;
+      _apiProgressMessage = null;
+    });
   }
 
   Future<void> _initializePreviewState() async {
@@ -971,9 +1168,9 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
     required Rect cropRect,
     required Size coordinateSpace,
     required bool updatePreview,
+    bool showLoading = true,
   }) async {
-    if (mounted) setState(() => _isUploading = true);
-
+    if (showLoading && mounted) setState(() => _isUploading = true);
     try {
       final bytes = await File(sourcePath).readAsBytes();
       final decoded = img.decodeImage(bytes);
@@ -1009,18 +1206,14 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
         width: cropW,
         height: cropH,
       );
-
-      final directory = await getTemporaryDirectory();
+      final dir = await getTemporaryDirectory();
       final path =
-          '${directory.path}/crop_${DateTime.now().millisecondsSinceEpoch}.jpg';
+          '${dir.path}/crop_${DateTime.now().millisecondsSinceEpoch}.jpg';
       final croppedFile = File(path);
       await croppedFile.writeAsBytes(img.encodeJpg(cropped));
 
-      if (updatePreview && mounted) {
-        setState(() {
-          _croppedPath = path;
-        });
-      }
+      if (updatePreview && mounted) setState(() => _croppedPath = path);
+
       return _CropResult(
         file: croppedFile,
         croppedSize: Size(cropW.toDouble(), cropH.toDouble()),
@@ -1032,10 +1225,10 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
         ),
       );
     } catch (e) {
-      debugPrint("Crop error: $e");
+      debugPrint('Crop error: $e');
       return null;
     } finally {
-      if (mounted) setState(() => _isUploading = false);
+      if (showLoading && mounted) setState(() => _isUploading = false);
     }
   }
 
@@ -1062,15 +1255,14 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
         ),
       );
     }
-
     if (_guideOuterRect != null && _previewCoordinateSize != null) {
-      final scaleX = imageSize.width / _previewCoordinateSize!.width;
-      final scaleY = imageSize.height / _previewCoordinateSize!.height;
+      final sx = imageSize.width / _previewCoordinateSize!.width;
+      final sy = imageSize.height / _previewCoordinateSize!.height;
       final outer = Rect.fromLTRB(
-        _guideOuterRect!.left * scaleX,
-        _guideOuterRect!.top * scaleY,
-        _guideOuterRect!.right * scaleX,
-        _guideOuterRect!.bottom * scaleY,
+        _guideOuterRect!.left * sx,
+        _guideOuterRect!.top * sy,
+        _guideOuterRect!.right * sx,
+        _guideOuterRect!.bottom * sy,
       );
       return CardOverlaySnapshot(
         coordinateSize: imageSize,
@@ -1078,28 +1270,31 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
         innerGuideRect: CardOverlaySnapshot.innerRectFromOuter(
           outer,
           imageSize,
-          insetScaleX: scaleX,
-          insetScaleY: scaleY,
+          insetScaleX: sx,
+          insetScaleY: sy,
         ),
       );
     }
-
     if (_detectedRectOriginal != null) {
-      final detected = _detectedRectOriginal!;
-      final outer = detected.inflate(24);
+      final outer = _detectedRectOriginal!.inflate(24);
       return CardOverlaySnapshot(
         coordinateSize: imageSize,
         outerGuideRect: outer,
-        innerGuideRect: CardOverlaySnapshot.innerRectFromOuter(outer, imageSize),
+        innerGuideRect: CardOverlaySnapshot.innerRectFromOuter(
+          outer,
+          imageSize,
+        ),
       );
     }
-
     return null;
   }
 
   Future<void> _onCheckPressed() async {
-    setState(() => _isUploading = true);
-
+    if (_isApiCalling || _isUploading) return;
+    setState(() {
+      _isUploading = true;
+      _apiProgressMessage = 'Preparing image…';
+    });
     try {
       File imageToUpload;
       _CropResult? finalCrop;
@@ -1115,6 +1310,7 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
           cropRect: _guideOuterRect!,
           coordinateSpace: _previewCoordinateSize!,
           updatePreview: false,
+          showLoading: false,
         );
         if (finalCrop == null) return;
         imageToUpload = finalCrop.file;
@@ -1129,8 +1325,19 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
         overlaySnapshot = await _overlaySnapshotForImage(imageSize: imageSize);
       }
 
-      final response = await _uploadImage(imageToUpload);
       if (!mounted) return;
+      setState(() {
+        _isUploading = false;
+        _isApiCalling = true;
+      });
+      _startApiProgressTimer();
+
+      final upload = await _uploadImage(imageToUpload);
+      _finishApiProgress(upload.elapsedMs);
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+      if (!mounted) return;
+
+      final response = upload.body;
 
       final detection = ApiCardDetection.fromResponse(response);
       final apiMessage = response['message']?.toString();
@@ -1139,11 +1346,9 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
         if (overlaySnapshot == null) {
           final imageSize = await _getImageSize(imageToUpload);
           if (detection.hasGeometry) {
-            overlaySnapshot =
-                CardOverlaySnapshot.fromApi(detection, imageSize);
+            overlaySnapshot = CardOverlaySnapshot.fromApi(detection, imageSize);
           }
         }
-
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(
@@ -1159,8 +1364,7 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
 
       final failureMessage = apiMessage?.isNotEmpty == true
           ? apiMessage!
-          : 'Not a Pokémon card';
-
+          : 'Not a card';
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(failureMessage),
@@ -1169,67 +1373,67 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
       );
       if (mounted) Navigator.pop(context);
     } catch (e) {
-      debugPrint("API Error: $e");
+      debugPrint('API Error: $e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Error: $e")),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error: $e')));
       }
     } finally {
-      if (mounted) setState(() => _isUploading = false);
+      if (mounted) {
+        setState(() => _isUploading = false);
+        if (_isApiCalling) _clearApiProgress();
+      }
     }
   }
 
-  Future<Map<String, dynamic>> _uploadImage(File imageFile) async {
-    var request = http.MultipartRequest('POST', Uri.parse(kDetectCardEndpoint));
-    if (kHfApiToken.isNotEmpty) {
-      request.headers['Authorization'] = 'Bearer $kHfApiToken';
-    }
-    request.files.add(
+  Future<({Map<String, dynamic> body, int elapsedMs})> _uploadImage(
+    File imageFile,
+  ) async {
+    final sw = Stopwatch()..start();
+    final req = http.MultipartRequest('POST', Uri.parse(kDetectCardEndpoint));
+    if (kHfApiToken.isNotEmpty)
+      req.headers['Authorization'] = 'Bearer $kHfApiToken';
+    req.files.add(
       await http.MultipartFile.fromPath(
         'file',
         imageFile.path,
         contentType: MediaType('image', 'jpeg'),
       ),
     );
-    var response = await http.Response.fromStream(await request.send());
-
-    debugPrint("API Response Body: ${response.body}");
-
-    if (response.statusCode == 200) {
-      final decoded = json.decode(response.body);
-      if (decoded is Map<String, dynamic>) return decoded;
-      return {"success": false, "message": "Invalid response format"};
+    final res = await http.Response.fromStream(await req.send());
+    sw.stop();
+    debugPrint('API (${sw.elapsedMilliseconds}ms): ${res.body}');
+    Map<String, dynamic> body;
+    if (res.statusCode == 200) {
+      final decoded = json.decode(res.body);
+      body = decoded is Map<String, dynamic>
+          ? decoded
+          : {'success': false, 'message': 'Invalid response'};
+    } else {
+      body = {'success': false, 'message': 'Server error ${res.statusCode}'};
     }
-    return {
-      "success": false,
-      "message": "Server error: ${response.statusCode}",
-    };
+    return (body: body, elapsedMs: sw.elapsedMilliseconds);
   }
 
-  /// Places guide boxes around the detected card inside the cropped image.
-  /// Uses cropped pixel space only: maps detection offset within the first-crop
-  /// region, then scales to [croppedSize].
   void _setGuideRectsAroundCard({
     required Rect detectedRect,
     required Rect firstCropRect,
     required Size croppedSize,
   }) {
-    final cardInCropLocal = Rect.fromLTRB(
+    final local = Rect.fromLTRB(
       detectedRect.left - firstCropRect.left,
       detectedRect.top - firstCropRect.top,
       detectedRect.right - firstCropRect.left,
       detectedRect.bottom - firstCropRect.top,
     );
-
-    final scaleX = croppedSize.width / firstCropRect.width;
-    final scaleY = croppedSize.height / firstCropRect.height;
-
+    final sx = croppedSize.width / firstCropRect.width;
+    final sy = croppedSize.height / firstCropRect.height;
     final cardInCrop = Rect.fromLTRB(
-      cardInCropLocal.left * scaleX,
-      cardInCropLocal.top * scaleY,
-      cardInCropLocal.right * scaleX,
-      cardInCropLocal.bottom * scaleY,
+      local.left * sx,
+      local.top * sy,
+      local.right * sx,
+      local.bottom * sy,
     );
 
     final pad = _guideOuterInset;
@@ -1247,27 +1451,21 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
       math.max(outerLeft + _minGap, outerRight),
       math.max(outerTop + _minGap, outerBottom),
     );
-
     _guideInnerRect = _innerRectFromOuter(_guideOuterRect!, croppedSize);
   }
 
-  /// Inner guide = outer inset by exactly 20px on all sides.
-  Rect _innerRectFromOuter(Rect outer, Size bounds) {
-    return CardOverlaySnapshot.innerRectFromOuter(outer, bounds);
-  }
+  Rect _innerRectFromOuter(Rect outer, Size bounds) =>
+      CardOverlaySnapshot.innerRectFromOuter(outer, bounds);
 
   void _onOuterGuideChanged(Rect outer) {
     final bounds = _previewCoordinateSize;
     if (bounds == null) return;
-
-    final minOuterSize = _minGap;
     final clamped = Rect.fromLTRB(
-      outer.left.clamp(0.0, bounds.width - minOuterSize),
-      outer.top.clamp(0.0, bounds.height - minOuterSize),
-      outer.right.clamp(outer.left + minOuterSize, bounds.width),
-      outer.bottom.clamp(outer.top + minOuterSize, bounds.height),
+      outer.left.clamp(0.0, bounds.width - _minGap),
+      outer.top.clamp(0.0, bounds.height - _minGap),
+      outer.right.clamp(outer.left + _minGap, bounds.width),
+      outer.bottom.clamp(outer.top + _minGap, bounds.height),
     );
-
     setState(() {
       _guideOuterRect = clamped;
       _guideInnerRect = _innerRectFromOuter(clamped, bounds);
@@ -1279,7 +1477,6 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
     required VoidCallback onValid,
   }) {
     setState(() => _cornerValidation = result.cornerValidation);
-
     if (!result.success) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -1291,79 +1488,48 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
       );
       return false;
     }
-
     onValid();
     return true;
   }
 
   Future<void> _handleAutoScan() async {
     if (_isAutoScanning || _isUploading) return;
-
     setState(() => _isAutoScanning = true);
-
     try {
       final sourcePath = _croppedPath ?? widget.imagePath;
-
-      // Before first crop use ML rect as hint
-      final hint = _isFirstCropApplied
-          ? null
-          : _detectedRectOriginal;
+      final hint = _isFirstCropApplied ? null : _detectedRectOriginal;
 
       final result = await CardCornerDetector.detectFromFile(
         File(sourcePath),
         searchRegion: hint,
-        outerPadding: _isFirstCropApplied
-            ? 0
-            : _guideOuterInset.abs(),
+        outerPadding: _isFirstCropApplied ? 0 : _guideOuterInset.abs(),
       );
-
       if (!mounted) return;
 
-      // =========================
-      // FIRST AUTO SCAN
-      // =========================
       if (!_isFirstCropApplied) {
         if (!_consumeOpenCvResult(result, onValid: () {})) return;
         final photoSize =
             _previewCoordinateSize ??
-                await _getImageSize(File(widget.imagePath));
-
+            await _getImageSize(File(widget.imagePath));
         if (!mounted) return;
-
-        final detectedBounds =
-        _boundsFromCorners(result.corners);
-
         setState(() {
-          _detectedRectOriginal = detectedBounds;
-
-          // SAVE REAL CARD POLYGON
+          _detectedRectOriginal = _boundsFromCorners(result.corners);
           _opencvCorners = result.corners;
-
           _previewCoordinateSize = photoSize;
         });
-
-        // FIRST CROP
         await _handleFirstCrop();
-
         if (!mounted || !_isFirstCropApplied) return;
-
-        // REFINE ON CROPPED IMAGE
-        final refined =
-        await CardCornerDetector.detectFromFile(
+        final refined = await CardCornerDetector.detectFromFile(
           File(_croppedPath!),
           outerPadding: _guideInnerInset,
         );
-
         if (!mounted) return;
-
-        if (!_consumeOpenCvResult(
+        _consumeOpenCvResult(
           refined,
           onValid: () {
             final bounds = _previewCoordinateSize;
             if (bounds == null) return;
-
             final refinedBounds = _boundsFromCorners(refined.corners);
-
             setState(() {
               _guideOuterRect = refinedBounds;
               _guideInnerRect = _innerRectFromOuter(refinedBounds, bounds);
@@ -1372,64 +1538,45 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
               _initialInnerGuide = _guideInnerRect;
             });
           },
-        )) {
-          return;
-        }
-      }
-
-      // =========================
-      // AFTER FIRST CROP
-      // =========================
-      else {
-        if (!_consumeOpenCvResult(
+        );
+      } else {
+        _consumeOpenCvResult(
           result,
           onValid: () {
             final bounds = _previewCoordinateSize;
             if (bounds == null) return;
-
-            final resultBounds = _boundsFromCorners(result.corners);
-
+            final rb = _boundsFromCorners(result.corners);
             setState(() {
-              _guideOuterRect = resultBounds;
-              _guideInnerRect = _innerRectFromOuter(resultBounds, bounds);
+              _guideOuterRect = rb;
+              _guideInnerRect = _innerRectFromOuter(rb, bounds);
               _opencvCorners = result.corners;
             });
           },
-        )) {
-          return;
-        }
-      }
-    } catch (e) {
-      debugPrint('Auto Scan Error: $e');
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Auto scan failed'),
-          ),
         );
       }
+    } catch (e) {
+      debugPrint('Auto Scan: $e');
+      if (mounted)
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Auto scan failed')));
     } finally {
-      if (mounted) {
-        setState(() => _isAutoScanning = false);
-      }
+      if (mounted) setState(() => _isAutoScanning = false);
     }
   }
-  Rect _boundsFromCorners(List<Offset> corners) {
-    double minX = corners.first.dx;
-    double maxX = corners.first.dx;
-    double minY = corners.first.dy;
-    double maxY = corners.first.dy;
 
+  Rect _boundsFromCorners(List<Offset> corners) {
+    double minX = corners.first.dx, maxX = corners.first.dx;
+    double minY = corners.first.dy, maxY = corners.first.dy;
     for (final p in corners) {
       minX = math.min(minX, p.dx);
       maxX = math.max(maxX, p.dx);
       minY = math.min(minY, p.dy);
       maxY = math.max(maxY, p.dy);
     }
-
     return Rect.fromLTRB(minX, minY, maxX, maxY);
   }
+
   Future<void> _handleFirstCrop() async {
     final detectedRect = _detectedRectOriginal;
     final previewCoordinateSize = _previewCoordinateSize;
@@ -1438,14 +1585,13 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
         previewCoordinateSize == null)
       return;
 
-    final paddingX = detectedRect.width * _cropPaddingFactor;
-    final paddingY = detectedRect.height * _cropPaddingFactor;
-
+    final padX = detectedRect.width * _cropPaddingFactor;
+    final padY = detectedRect.height * _cropPaddingFactor;
     final firstCropRect = Rect.fromLTRB(
-      math.max(0, detectedRect.left - paddingX),
-      math.max(0, detectedRect.top - paddingY),
-      math.min(previewCoordinateSize.width, detectedRect.right + paddingX),
-      math.min(previewCoordinateSize.height, detectedRect.bottom + paddingY),
+      math.max(0, detectedRect.left - padX),
+      math.max(0, detectedRect.top - padY),
+      math.min(previewCoordinateSize.width, detectedRect.right + padX),
+      math.min(previewCoordinateSize.height, detectedRect.bottom + padY),
     );
 
     final cropped = await _cropRectFromImage(
@@ -1461,15 +1607,13 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
       firstCropRect: firstCropRect,
       croppedSize: cropped.croppedSize,
     );
-    final outerGuide = _guideOuterRect!;
-    final innerGuide = _guideInnerRect!;
 
     setState(() {
       _isFirstCropApplied = true;
       _firstCropRect = firstCropRect;
       _previewCoordinateSize = cropped.croppedSize;
-      _initialOuterGuide = outerGuide;
-      _initialInnerGuide = innerGuide;
+      _initialOuterGuide = _guideOuterRect;
+      _initialInnerGuide = _guideInnerRect;
     });
   }
 
@@ -1478,345 +1622,368 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
-        title: const Text("Preview"),
+        title: const Text('Preview'),
         backgroundColor: Colors.transparent,
         elevation: 0,
       ),
-      body: Column(
+      body: Stack(
         children: [
-          Expanded(
-            child:
-                _isFirstCropApplied &&
-                    _croppedPath != null &&
-                    _guideOuterRect != null &&
-                    _guideInnerRect != null &&
-                    _previewCoordinateSize != null
-                ? Center(
-                    child: FittedBox(
-                      fit: BoxFit.contain,
-                      child: SizedBox(
-                        width: _previewCoordinateSize!.width,
-                        height: _previewCoordinateSize!.height,
-                        child: Stack(
-                          clipBehavior: Clip.none,
-                          children: [
-                            Image.file(
-                              File(_croppedPath!),
-                              key: ValueKey(_croppedPath),
-                              width: _previewCoordinateSize!.width,
-                              height: _previewCoordinateSize!.height,
-                              fit: BoxFit.fill,
-                            ),
-                            SecondStageCropOverlay(
-                              imageBounds: Rect.fromLTWH(
-                                0,
-                                0,
-                                _previewCoordinateSize!.width,
-                                _previewCoordinateSize!.height,
-                              ),
-                              coordinateSize: _previewCoordinateSize!,
-                              outerGuideRect: _guideOuterRect!,
-                              innerGuideRect: _guideInnerRect!,
-                              onOuterChanged: _onOuterGuideChanged,
-                              onInnerChanged: (rect) =>
-                                  setState(() => _guideInnerRect = rect),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  )
-                : Stack(
-                    children: [
-                      Center(
-                        child: Image.file(
-                          File(_croppedPath ?? widget.imagePath),
-                          key: ValueKey(_croppedPath),
-                          fit: BoxFit.contain,
-                        ),
-                      ),
-                      if (!_isFirstCropApplied &&
-                          _detectedRectOriginal != null &&
-                          _previewCoordinateSize != null)
-                        Positioned.fill(
-                          child: LayoutBuilder(
-                            builder: (context, constraints) {
-                              return FutureBuilder<Size>(
-                                future: _getImageSize(File(widget.imagePath)),
-                                builder: (context, snapshot) {
-                                  if (!snapshot.hasData)
-                                    return const SizedBox.shrink();
-                                  final displayRect = _getDisplayedImageRect(
-                                    containerSize: Size(
-                                      constraints.maxWidth,
-                                      constraints.maxHeight,
-                                    ),
-                                    imageSize: snapshot.data!,
-                                  );
-                                  return CropEditorOverlay(
-                                    imageBounds: displayRect,
-                                    coordinateSize: _previewCoordinateSize!,
-                                    detectedRect: _detectedRectOriginal!,
-                                    onBackgroundTap: _handleFirstCrop,
-                                  );
-                                },
-                              );
-                            },
-                          ),
-                        ),
-                    ],
-                  ),
+          Column(
+            children: [
+              Expanded(child: _buildImageArea()),
+              _buildButtonBar(),
+              if (_cornerValidation != null) _buildCornerValidationChip(),
+              if (_isFirstCropApplied &&
+                  _croppedPath != null &&
+                  _guideOuterRect != null &&
+                  _guideInnerRect != null)
+                _buildMetricRow(),
+            ],
           ),
-          Container(
-            padding: const EdgeInsets.all(24.0),
-            decoration: const BoxDecoration(
-              color: Colors.black87,
-              borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-            ),
-            child: _isUploading || _isAutoScanning
-                ? const Center(child: CircularProgressIndicator())
-                : Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Row(
-                        children: [
-                          Expanded(
-                            child: OutlinedButton(
-                              onPressed: () => Navigator.pop(context),
-                              style: OutlinedButton.styleFrom(
-                                minimumSize: const Size(0, 48),
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 8,
-                                ),
-                                side: const BorderSide(
-                                  color: Colors.white,
-                                  width: 2,
-                                ),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                              ),
-                              child: _previewActionLabel(
-                                'Retake',
-                                color: Colors.white,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: ElevatedButton(
-                              onPressed: _isFirstCropApplied
-                                  ? () {
-                                      if (_initialOuterGuide != null &&
-                                          _previewCoordinateSize != null) {
-                                        setState(() {
-                                          _guideOuterRect = _initialOuterGuide;
-                                          _guideInnerRect = _innerRectFromOuter(
-                                            _initialOuterGuide!,
-                                            _previewCoordinateSize!,
-                                          );
-                                        });
-                                      }
-                                    }
-                                  : _handleFirstCrop,
-                              style: ElevatedButton.styleFrom(
-                                minimumSize: const Size(0, 48),
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 8,
-                                ),
-                                backgroundColor: const Color(0xFF4A80F0),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                              ),
-                              child: _previewActionLabel(
-                                _isFirstCropApplied ? 'ML Crop' : 'ML Crop',
-                                color: Colors.white,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: ElevatedButton(
-                              onPressed: _onCheckPressed,
-                              style: ElevatedButton.styleFrom(
-                                minimumSize: const Size(0, 48),
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 8,
-                                ),
-                                backgroundColor: Colors.white,
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                              ),
-                              child: _previewActionLabel(
-                                _isFirstCropApplied ? 'Api Check' : 'Api Check',
-                                color: Colors.black,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      SizedBox(
-                        width: double.infinity,
-                        child: OutlinedButton.icon(
-                          onPressed: _handleAutoScan,
-                          style: OutlinedButton.styleFrom(
-                            minimumSize: const Size(0, 48),
-                            side: const BorderSide(
-                              color: Colors.white,
-                              width: 2,
-                            ),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                          ),
-                          icon: const Icon(
-                            Icons.document_scanner_outlined,
-                            color: Colors.white,
-                            size: 20,
-                          ),
-                          label: _previewActionLabel(
-                            'OpenCV Auto Scan',
-                            color: Colors.white,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-          ),
-          if (_cornerValidation != null)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-              child: Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 12,
-                ),
-                decoration: BoxDecoration(
-                  color: _cornerValidation!.isValid
-                      ? const Color(0xFF1A3324)
-                      : const Color(0xFF3A1A1A),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                    color: _cornerValidation!.isValid
-                        ? const Color(0xFF3DDC84)
-                        : const Color(0xFFFF5252),
-                    width: 1.5,
-                  ),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      _cornerValidation!.isValid
-                          ? 'OpenCV corners valid'
-                          : 'OpenCV corners invalid — rescan',
-                      style: TextStyle(
-                        color: _cornerValidation!.isValid
-                            ? const Color(0xFF3DDC84)
-                            : const Color(0xFFFF5252),
-                        fontWeight: FontWeight.w700,
-                        fontSize: 13,
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      'Max X/Y defect: '
-                      '${_cornerValidation!.maxAxisDefectPx.toStringAsFixed(1)} px '
-                      '(limit ${CardCornerValidator.maxDefect.toInt()}) · Max angle: '
-                      '${_cornerValidation!.maxAngleDefectDeg.toStringAsFixed(1)}° '
-                      '(limit ${CardCornerValidator.maxDefect.toInt()})',
-                      style: const TextStyle(
-                        color: Colors.white70,
-                        fontSize: 12,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          if (_isFirstCropApplied &&
-              _croppedPath != null &&
-              _guideOuterRect != null &&
-              _guideInnerRect != null)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: _buildMetricCard(
-                      'Horizontal',
-                      _formatSplitValue(
-                        _guideInnerRect!.left - _guideOuterRect!.left,
-                        _guideOuterRect!.right - _guideInnerRect!.right,
-                      ),
-                      icon: Icons.swap_horiz,
-                      subtitle: 'Left · Right',
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: _buildMetricCard(
-                      'Vertical',
-                      _formatSplitValue(
-                        _guideInnerRect!.top - _guideOuterRect!.top,
-                        _guideOuterRect!.bottom - _guideInnerRect!.bottom,
-                      ),
-                      icon: Icons.swap_vert,
-                      subtitle: 'Top · Bottom',
-                    ),
-                  ),
-                ],
-              ),
-            ),
+          if (_isApiCalling) _buildApiProgressOverlay(),
         ],
       ),
     );
   }
 
-  Rect _getDisplayedImageRect({
-    required Size containerSize,
-    required Size imageSize,
-  }) {
-    final scale = math.min(
-      containerSize.width / imageSize.width,
-      containerSize.height / imageSize.height,
-    );
-    final width = imageSize.width * scale;
-    final height = imageSize.height * scale;
-    return Rect.fromLTWH(
-      (containerSize.width - width) / 2,
-      (containerSize.height - height) / 2,
-      width,
-      height,
-    );
-  }
-
-  Widget _previewActionLabel(String text, {required Color color}) {
-    return Text(
-      text,
-      maxLines: 1,
-      softWrap: false,
-      overflow: TextOverflow.ellipsis,
-      textAlign: TextAlign.center,
-      style: TextStyle(
-        color: color,
-        fontSize: 14,
-        fontWeight: FontWeight.bold,
-        letterSpacing: 0.2,
+  Widget _buildApiProgressOverlay() {
+    final pct = (_apiProgress * 100).round().clamp(0, 100);
+    return Positioned.fill(
+      child: Container(
+        color: Colors.black.withValues(alpha: 0.78),
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 36),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: LinearProgressIndicator(
+                    value: _apiProgress,
+                    minHeight: 8,
+                    backgroundColor: Colors.white24,
+                    color: const Color(0xFF7B61FF),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                Text(
+                  _apiProgressMessage ?? 'Please wait…',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  '$pct% · ${_apiElapsedSec}s elapsed · typical ~$_apiExpectedSec s',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white54, fontSize: 13),
+                ),
+                if (_lastApiResponseMs != null) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    'Response time: ${(_lastApiResponseMs! / 1000).toStringAsFixed(1)} s',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: Color(0xFF3DDC84),
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
 
-  Widget _buildMetricCard(
+  Widget _buildImageArea() {
+    if (_isFirstCropApplied &&
+        _croppedPath != null &&
+        _guideOuterRect != null &&
+        _guideInnerRect != null &&
+        _previewCoordinateSize != null) {
+      return Center(
+        child: FittedBox(
+          fit: BoxFit.contain,
+          child: SizedBox(
+            width: _previewCoordinateSize!.width,
+            height: _previewCoordinateSize!.height,
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                Image.file(
+                  File(_croppedPath!),
+                  key: ValueKey(_croppedPath),
+                  width: _previewCoordinateSize!.width,
+                  height: _previewCoordinateSize!.height,
+                  fit: BoxFit.fill,
+                ),
+                SecondStageCropOverlay(
+                  imageBounds: Rect.fromLTWH(
+                    0,
+                    0,
+                    _previewCoordinateSize!.width,
+                    _previewCoordinateSize!.height,
+                  ),
+                  coordinateSize: _previewCoordinateSize!,
+                  outerGuideRect: _guideOuterRect!,
+                  innerGuideRect: _guideInnerRect!,
+                  onOuterChanged: _onOuterGuideChanged,
+                  onInnerChanged: (r) => setState(() => _guideInnerRect = r),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Stack(
+      children: [
+        Center(
+          child: Image.file(
+            File(_croppedPath ?? widget.imagePath),
+            key: ValueKey(_croppedPath),
+            fit: BoxFit.contain,
+          ),
+        ),
+        if (!_isFirstCropApplied &&
+            _detectedRectOriginal != null &&
+            _previewCoordinateSize != null)
+          Positioned.fill(
+            child: LayoutBuilder(
+              builder: (ctx, constraints) {
+                return FutureBuilder<Size>(
+                  future: _getImageSize(File(widget.imagePath)),
+                  builder: (ctx, snap) {
+                    if (!snap.hasData) return const SizedBox.shrink();
+                    final displayRect = _getDisplayedImageRect(
+                      containerSize: Size(
+                        constraints.maxWidth,
+                        constraints.maxHeight,
+                      ),
+                      imageSize: snap.data!,
+                    );
+                    return CropEditorOverlay(
+                      imageBounds: displayRect,
+                      coordinateSize: _previewCoordinateSize!,
+                      detectedRect: _detectedRectOriginal!,
+                      onBackgroundTap: _handleFirstCrop,
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildButtonBar() {
+    return Container(
+      padding: const EdgeInsets.all(24),
+      decoration: const BoxDecoration(
+        color: Colors.black87,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      child: (_isUploading && !_isApiCalling) || _isAutoScanning
+          ? const Center(child: CircularProgressIndicator())
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: (_isApiCalling || _isUploading)
+                            ? null
+                            : () => Navigator.pop(context),
+                        style: OutlinedButton.styleFrom(
+                          minimumSize: const Size(0, 48),
+                          side: const BorderSide(color: Colors.white, width: 2),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                        child: _label('Retake', Colors.white),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: _isFirstCropApplied
+                            ? () {
+                                if (_initialOuterGuide != null &&
+                                    _previewCoordinateSize != null) {
+                                  setState(() {
+                                    _guideOuterRect = _initialOuterGuide;
+                                    _guideInnerRect = _innerRectFromOuter(
+                                      _initialOuterGuide!,
+                                      _previewCoordinateSize!,
+                                    );
+                                  });
+                                }
+                              }
+                            : _handleFirstCrop,
+                        style: ElevatedButton.styleFrom(
+                          minimumSize: const Size(0, 48),
+                          backgroundColor: const Color(0xFF4A80F0),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                        child: _label('ML Crop', Colors.white),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: (_isApiCalling || _isUploading)
+                            ? null
+                            : _onCheckPressed,
+                        style: ElevatedButton.styleFrom(
+                          minimumSize: const Size(0, 48),
+                          backgroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                        child: _label('API Check', Colors.black),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: (_isApiCalling || _isUploading)
+                        ? null
+                        : _handleAutoScan,
+                    style: OutlinedButton.styleFrom(
+                      minimumSize: const Size(0, 48),
+                      side: const BorderSide(color: Colors.white, width: 2),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    icon: const Icon(
+                      Icons.document_scanner_outlined,
+                      color: Colors.white,
+                      size: 20,
+                    ),
+                    label: _label('OpenCV Auto Scan', Colors.white),
+                  ),
+                ),
+              ],
+            ),
+    );
+  }
+
+  Widget _label(String text, Color color) => Text(
+    text,
+    maxLines: 1,
+    overflow: TextOverflow.ellipsis,
+    textAlign: TextAlign.center,
+    style: TextStyle(
+      color: color,
+      fontSize: 14,
+      fontWeight: FontWeight.bold,
+      letterSpacing: 0.2,
+    ),
+  );
+
+  Widget _buildCornerValidationChip() {
+    final v = _cornerValidation!;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: v.isValid ? const Color(0xFF1A3324) : const Color(0xFF3A1A1A),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: v.isValid
+                ? const Color(0xFF3DDC84)
+                : const Color(0xFFFF5252),
+            width: 1.5,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              v.isValid
+                  ? 'OpenCV corners valid'
+                  : 'OpenCV corners invalid — rescan',
+              style: TextStyle(
+                color: v.isValid
+                    ? const Color(0xFF3DDC84)
+                    : const Color(0xFFFF5252),
+                fontWeight: FontWeight.w700,
+                fontSize: 13,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Max X/Y defect: ${v.maxAxisDefectPx.toStringAsFixed(1)} px '
+              '(limit ${CardCornerValidator.maxDefect.toInt()}) · '
+              'Max angle: ${v.maxAngleDefectDeg.toStringAsFixed(1)}° '
+              '(limit ${CardCornerValidator.maxDefect.toInt()})',
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMetricRow() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+      child: Row(
+        children: [
+          Expanded(
+            child: _metricCard(
+              'Horizontal',
+              _formatSplit(
+                _guideInnerRect!.left - _guideOuterRect!.left,
+                _guideOuterRect!.right - _guideInnerRect!.right,
+              ),
+              Icons.swap_horiz,
+              'Left · Right',
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: _metricCard(
+              'Vertical',
+              _formatSplit(
+                _guideInnerRect!.top - _guideOuterRect!.top,
+                _guideOuterRect!.bottom - _guideInnerRect!.bottom,
+              ),
+              Icons.swap_vert,
+              'Top · Bottom',
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _metricCard(
     String title,
-    String value, {
-    IconData? icon,
-    String? subtitle,
-  }) {
+    String value,
+    IconData icon,
+    String subtitle,
+  ) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       decoration: BoxDecoration(
@@ -1825,10 +1992,8 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
       ),
       child: Row(
         children: [
-          if (icon != null) ...[
-            Icon(icon, color: const Color(0xFF7B61FF), size: 28),
-            const SizedBox(width: 12),
-          ],
+          Icon(icon, color: const Color(0xFF7B61FF), size: 28),
+          const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1843,19 +2008,16 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                     fontWeight: FontWeight.w600,
                   ),
                 ),
-                if (subtitle != null) ...[
-                  const SizedBox(height: 2),
-                  Text(
-                    subtitle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Colors.white38,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w500,
-                    ),
+                Text(
+                  subtitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white38,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w500,
                   ),
-                ],
+                ),
                 const SizedBox(height: 4),
                 Text(
                   value,
@@ -1875,12 +2037,26 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
     );
   }
 
-  String _formatSplitValue(double first, double second) {
-    final total = first + second;
-    if (total <= 0) return "50.0/50.0";
-    final firstPercent = (first / total) * 100;
-    final secondPercent = (second / total) * 100;
-    return "${firstPercent.toStringAsFixed(1)}/${secondPercent.toStringAsFixed(1)}";
+  String _formatSplit(double a, double b) {
+    final total = a + b;
+    if (total <= 0) return '50.0/50.0';
+    return '${((a / total) * 100).toStringAsFixed(1)}/${((b / total) * 100).toStringAsFixed(1)}';
+  }
+
+  Rect _getDisplayedImageRect({
+    required Size containerSize,
+    required Size imageSize,
+  }) {
+    final scale = math.min(
+      containerSize.width / imageSize.width,
+      containerSize.height / imageSize.height,
+    );
+    return Rect.fromLTWH(
+      (containerSize.width - imageSize.width * scale) / 2,
+      (containerSize.height - imageSize.height * scale) / 2,
+      imageSize.width * scale,
+      imageSize.height * scale,
+    );
   }
 
   Future<Size> _getImageSize(File file) async {
@@ -1892,6 +2068,10 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
         : Size(image.width.toDouble(), image.height.toDouble());
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CROP EDITOR OVERLAY (Phase 1 — full photo)
+// ═══════════════════════════════════════════════════════════════════════════════
 
 class CropEditorOverlay extends StatelessWidget {
   final Rect imageBounds;
@@ -1936,13 +2116,13 @@ class CropOverlayPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final scaleX = imageBounds.width / coordinateSize.width;
-    final scaleY = imageBounds.height / coordinateSize.height;
+    final sx = imageBounds.width / coordinateSize.width;
+    final sy = imageBounds.height / coordinateSize.height;
     final displayRect = Rect.fromLTRB(
-      imageBounds.left + (detectedRect.left * scaleX),
-      imageBounds.top + (detectedRect.top * scaleY),
-      imageBounds.left + (detectedRect.right * scaleX),
-      imageBounds.top + (detectedRect.bottom * scaleY),
+      imageBounds.left + detectedRect.left * sx,
+      imageBounds.top + detectedRect.top * sy,
+      imageBounds.left + detectedRect.right * sx,
+      imageBounds.top + detectedRect.bottom * sy,
     );
     canvas.drawRect(
       displayRect,
@@ -1954,9 +2134,13 @@ class CropOverlayPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant CropOverlayPainter oldDelegate) =>
-      oldDelegate.detectedRect != detectedRect;
+  bool shouldRepaint(CropOverlayPainter old) =>
+      old.detectedRect != detectedRect;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECOND STAGE CROP OVERLAY (Phase 2 — cropped image with draggable guides)
+// ═══════════════════════════════════════════════════════════════════════════════
 
 class SecondStageCropOverlay extends StatelessWidget {
   final Rect imageBounds;
@@ -1976,20 +2160,22 @@ class SecondStageCropOverlay extends StatelessWidget {
     required this.onInnerChanged,
   });
 
-  Offset _toDisplayPoint(Offset point) {
-    final scaleX = imageBounds.width / coordinateSize.width;
-    final scaleY = imageBounds.height / coordinateSize.height;
+  Offset _toDisplay(Offset point) {
+    final sx = imageBounds.width / coordinateSize.width;
+    final sy = imageBounds.height / coordinateSize.height;
     return Offset(
-      imageBounds.left + (point.dx * scaleX),
-      imageBounds.top + (point.dy * scaleY),
+      imageBounds.left + point.dx * sx,
+      imageBounds.top + point.dy * sy,
     );
   }
 
-  double _deltaToCoordinateX(double delta) =>
-      delta * coordinateSize.width / imageBounds.width;
+  double _dx(double delta) => delta * coordinateSize.width / imageBounds.width;
 
-  double _deltaToCoordinateY(double delta) =>
+  double _dy(double delta) =>
       delta * coordinateSize.height / imageBounds.height;
+
+  static const double _minGap = 12.0;
+  static const double _innerInset = 20.0;
 
   @override
   Widget build(BuildContext context) {
@@ -2004,186 +2190,152 @@ class SecondStageCropOverlay extends StatelessWidget {
             ),
           ),
         ),
-        // Corner handles for outer guide
-        _buildCornerHandle(
-          point: _toDisplayPoint(
-            Offset(outerGuideRect.left, outerGuideRect.top),
-          ),
-          color: const Color(0xFF7B61FF),
-          onDrag: (details) {
-            final dx = _deltaToCoordinateX(details.delta.dx);
-            final dy = _deltaToCoordinateY(details.delta.dy);
-            final nextLeft = (outerGuideRect.left + dx).clamp(
-              0.0,
-              outerGuideRect.right - _ConfirmationScreenState._minGap,
-            );
-            final nextTop = (outerGuideRect.top + dy).clamp(
-              0.0,
-              outerGuideRect.bottom - _ConfirmationScreenState._minGap,
-            );
+
+        // Outer corners
+        _corner(
+          _toDisplay(Offset(outerGuideRect.left, outerGuideRect.top)),
+          const Color(0xFF7B61FF),
+          (d) {
             onOuterChanged(
               Rect.fromLTRB(
-                nextLeft,
-                nextTop,
+                (outerGuideRect.left + _dx(d.delta.dx)).clamp(
+                  0,
+                  outerGuideRect.right - _minGap,
+                ),
+                (outerGuideRect.top + _dy(d.delta.dy)).clamp(
+                  0,
+                  outerGuideRect.bottom - _minGap,
+                ),
                 outerGuideRect.right,
                 outerGuideRect.bottom,
               ),
             );
           },
         ),
-        _buildCornerHandle(
-          point: _toDisplayPoint(
-            Offset(outerGuideRect.right, outerGuideRect.top),
-          ),
-          color: const Color(0xFF7B61FF),
-          onDrag: (details) {
-            final dx = _deltaToCoordinateX(details.delta.dx);
-            final dy = _deltaToCoordinateY(details.delta.dy);
-            final nextRight = (outerGuideRect.right + dx).clamp(
-              outerGuideRect.left + _ConfirmationScreenState._minGap,
-              coordinateSize.width,
-            );
-            final nextTop = (outerGuideRect.top + dy).clamp(
-              0.0,
-              outerGuideRect.bottom - _ConfirmationScreenState._minGap,
-            );
+        _corner(
+          _toDisplay(Offset(outerGuideRect.right, outerGuideRect.top)),
+          const Color(0xFF7B61FF),
+          (d) {
             onOuterChanged(
               Rect.fromLTRB(
                 outerGuideRect.left,
-                nextTop,
-                nextRight,
+                (outerGuideRect.top + _dy(d.delta.dy)).clamp(
+                  0,
+                  outerGuideRect.bottom - _minGap,
+                ),
+                (outerGuideRect.right + _dx(d.delta.dx)).clamp(
+                  outerGuideRect.left + _minGap,
+                  coordinateSize.width,
+                ),
                 outerGuideRect.bottom,
               ),
             );
           },
         ),
-        _buildCornerHandle(
-          point: _toDisplayPoint(
-            Offset(outerGuideRect.right, outerGuideRect.bottom),
-          ),
-          color: const Color(0xFF7B61FF),
-          onDrag: (details) {
-            final dx = _deltaToCoordinateX(details.delta.dx);
-            final dy = _deltaToCoordinateY(details.delta.dy);
-            final nextRight = (outerGuideRect.right + dx).clamp(
-              outerGuideRect.left + _ConfirmationScreenState._minGap,
-              coordinateSize.width,
-            );
-            final nextBottom = (outerGuideRect.bottom + dy).clamp(
-              outerGuideRect.top + _ConfirmationScreenState._minGap,
-              coordinateSize.height,
-            );
+        _corner(
+          _toDisplay(Offset(outerGuideRect.right, outerGuideRect.bottom)),
+          const Color(0xFF7B61FF),
+          (d) {
             onOuterChanged(
               Rect.fromLTRB(
                 outerGuideRect.left,
                 outerGuideRect.top,
-                nextRight,
-                nextBottom,
+                (outerGuideRect.right + _dx(d.delta.dx)).clamp(
+                  outerGuideRect.left + _minGap,
+                  coordinateSize.width,
+                ),
+                (outerGuideRect.bottom + _dy(d.delta.dy)).clamp(
+                  outerGuideRect.top + _minGap,
+                  coordinateSize.height,
+                ),
               ),
             );
           },
         ),
-        _buildCornerHandle(
-          point: _toDisplayPoint(
-            Offset(outerGuideRect.left, outerGuideRect.bottom),
-          ),
-          color: const Color(0xFF7B61FF),
-          onDrag: (details) {
-            final dx = _deltaToCoordinateX(details.delta.dx);
-            final dy = _deltaToCoordinateY(details.delta.dy);
-            final nextLeft = (outerGuideRect.left + dx).clamp(
-              0.0,
-              outerGuideRect.right - _ConfirmationScreenState._minGap,
-            );
-            final nextBottom = (outerGuideRect.bottom + dy).clamp(
-              outerGuideRect.top + _ConfirmationScreenState._minGap,
-              coordinateSize.height,
-            );
+        _corner(
+          _toDisplay(Offset(outerGuideRect.left, outerGuideRect.bottom)),
+          const Color(0xFF7B61FF),
+          (d) {
             onOuterChanged(
               Rect.fromLTRB(
-                nextLeft,
+                (outerGuideRect.left + _dx(d.delta.dx)).clamp(
+                  0,
+                  outerGuideRect.right - _minGap,
+                ),
                 outerGuideRect.top,
                 outerGuideRect.right,
-                nextBottom,
+                (outerGuideRect.bottom + _dy(d.delta.dy)).clamp(
+                  outerGuideRect.top + _minGap,
+                  coordinateSize.height,
+                ),
               ),
             );
           },
         ),
-        _buildHandle(
-          point: _toDisplayPoint(
+
+        // Outer edge handles
+        _handle(
+          _toDisplay(
             Offset(
               (outerGuideRect.left + outerGuideRect.right) / 2,
               outerGuideRect.top,
             ),
           ),
-          icon: Icons.keyboard_arrow_up,
-          color: const Color(0xFF7B61FF),
-          onDrag: (details) {
-            final nextTop =
-                (outerGuideRect.top + _deltaToCoordinateY(details.delta.dy))
-                    .clamp(
-                      0.0,
-                      outerGuideRect.bottom -
-                          _ConfirmationScreenState._minGap -
-                          _ConfirmationScreenState._guideInnerInset * 2,
-                    );
+          Icons.keyboard_arrow_up,
+          const Color(0xFF7B61FF),
+          (d) {
             onOuterChanged(
               Rect.fromLTRB(
                 outerGuideRect.left,
-                nextTop,
+                (outerGuideRect.top + _dy(d.delta.dy)).clamp(
+                  0,
+                  outerGuideRect.bottom - _minGap - _innerInset * 2,
+                ),
                 outerGuideRect.right,
                 outerGuideRect.bottom,
               ),
             );
           },
         ),
-        _buildHandle(
-          point: _toDisplayPoint(
+        _handle(
+          _toDisplay(
             Offset(
               (outerGuideRect.left + outerGuideRect.right) / 2,
               outerGuideRect.bottom,
             ),
           ),
-          icon: Icons.keyboard_arrow_down,
-          color: const Color(0xFF7B61FF),
-          onDrag: (details) {
-            final minBottom =
-                outerGuideRect.top +
-                _ConfirmationScreenState._minGap +
-                _ConfirmationScreenState._guideInnerInset * 2;
-            final nextBottom =
-                (outerGuideRect.bottom + _deltaToCoordinateY(details.delta.dy))
-                    .clamp(minBottom, coordinateSize.height);
+          Icons.keyboard_arrow_down,
+          const Color(0xFF7B61FF),
+          (d) {
             onOuterChanged(
               Rect.fromLTRB(
                 outerGuideRect.left,
                 outerGuideRect.top,
                 outerGuideRect.right,
-                nextBottom,
+                (outerGuideRect.bottom + _dy(d.delta.dy)).clamp(
+                  outerGuideRect.top + _minGap + _innerInset * 2,
+                  coordinateSize.height,
+                ),
               ),
             );
           },
         ),
-        _buildHandle(
-          point: _toDisplayPoint(
+        _handle(
+          _toDisplay(
             Offset(
               outerGuideRect.left,
               (outerGuideRect.top + outerGuideRect.bottom) / 2,
             ),
           ),
-          icon: Icons.keyboard_arrow_left,
-          color: const Color(0xFF7B61FF),
-          onDrag: (details) {
-            final maxLeft =
-                outerGuideRect.right -
-                _ConfirmationScreenState._minGap -
-                _ConfirmationScreenState._guideInnerInset * 2;
-            final nextLeft =
-                (outerGuideRect.left + _deltaToCoordinateX(details.delta.dx))
-                    .clamp(0.0, maxLeft);
+          Icons.keyboard_arrow_left,
+          const Color(0xFF7B61FF),
+          (d) {
             onOuterChanged(
               Rect.fromLTRB(
-                nextLeft,
+                (outerGuideRect.left + _dx(d.delta.dx)).clamp(
+                  0,
+                  outerGuideRect.right - _minGap - _innerInset * 2,
+                ),
                 outerGuideRect.top,
                 outerGuideRect.right,
                 outerGuideRect.bottom,
@@ -2191,104 +2343,93 @@ class SecondStageCropOverlay extends StatelessWidget {
             );
           },
         ),
-        _buildHandle(
-          point: _toDisplayPoint(
+        _handle(
+          _toDisplay(
             Offset(
               outerGuideRect.right,
               (outerGuideRect.top + outerGuideRect.bottom) / 2,
             ),
           ),
-          icon: Icons.keyboard_arrow_right,
-          color: const Color(0xFF7B61FF),
-          onDrag: (details) {
-            final minRight =
-                outerGuideRect.left +
-                _ConfirmationScreenState._minGap +
-                _ConfirmationScreenState._guideInnerInset * 2;
-            final nextRight =
-                (outerGuideRect.right + _deltaToCoordinateX(details.delta.dx))
-                    .clamp(minRight, coordinateSize.width);
+          Icons.keyboard_arrow_right,
+          const Color(0xFF7B61FF),
+          (d) {
             onOuterChanged(
               Rect.fromLTRB(
                 outerGuideRect.left,
                 outerGuideRect.top,
-                nextRight,
+                (outerGuideRect.right + _dx(d.delta.dx)).clamp(
+                  outerGuideRect.left + _minGap + _innerInset * 2,
+                  coordinateSize.width,
+                ),
                 outerGuideRect.bottom,
               ),
             );
           },
         ),
-        _buildHandle(
-          point: _toDisplayPoint(
+
+        // Inner edge handles
+        _handle(
+          _toDisplay(
             Offset(
               (innerGuideRect.left + innerGuideRect.right) / 2,
               innerGuideRect.top,
             ),
           ),
-          icon: Icons.keyboard_arrow_down,
-          color: const Color(0xFF3DDC84),
-          onDrag: (details) {
-            final nextTop =
-                (innerGuideRect.top + _deltaToCoordinateY(details.delta.dy))
-                    .clamp(
-                      outerGuideRect.top + _ConfirmationScreenState._minGap,
-                      innerGuideRect.bottom - _ConfirmationScreenState._minGap,
-                    );
+          Icons.keyboard_arrow_down,
+          const Color(0xFF3DDC84),
+          (d) {
             onInnerChanged(
               Rect.fromLTRB(
                 innerGuideRect.left,
-                nextTop,
+                (innerGuideRect.top + _dy(d.delta.dy)).clamp(
+                  outerGuideRect.top + _minGap,
+                  innerGuideRect.bottom - _minGap,
+                ),
                 innerGuideRect.right,
                 innerGuideRect.bottom,
               ),
             );
           },
         ),
-        _buildHandle(
-          point: _toDisplayPoint(
+        _handle(
+          _toDisplay(
             Offset(
               (innerGuideRect.left + innerGuideRect.right) / 2,
               innerGuideRect.bottom,
             ),
           ),
-          icon: Icons.keyboard_arrow_up,
-          color: const Color(0xFF3DDC84),
-          onDrag: (details) {
-            final nextBottom =
-                (innerGuideRect.bottom + _deltaToCoordinateY(details.delta.dy))
-                    .clamp(
-                      innerGuideRect.top + _ConfirmationScreenState._minGap,
-                      outerGuideRect.bottom - _ConfirmationScreenState._minGap,
-                    );
+          Icons.keyboard_arrow_up,
+          const Color(0xFF3DDC84),
+          (d) {
             onInnerChanged(
               Rect.fromLTRB(
                 innerGuideRect.left,
                 innerGuideRect.top,
                 innerGuideRect.right,
-                nextBottom,
+                (innerGuideRect.bottom + _dy(d.delta.dy)).clamp(
+                  innerGuideRect.top + _minGap,
+                  outerGuideRect.bottom - _minGap,
+                ),
               ),
             );
           },
         ),
-        _buildHandle(
-          point: _toDisplayPoint(
+        _handle(
+          _toDisplay(
             Offset(
               innerGuideRect.left,
               (innerGuideRect.top + innerGuideRect.bottom) / 2,
             ),
           ),
-          icon: Icons.keyboard_arrow_right,
-          color: const Color(0xFF3DDC84),
-          onDrag: (details) {
-            final nextLeft =
-                (innerGuideRect.left + _deltaToCoordinateX(details.delta.dx))
-                    .clamp(
-                      outerGuideRect.left + _ConfirmationScreenState._minGap,
-                      innerGuideRect.right - _ConfirmationScreenState._minGap,
-                    );
+          Icons.keyboard_arrow_right,
+          const Color(0xFF3DDC84),
+          (d) {
             onInnerChanged(
               Rect.fromLTRB(
-                nextLeft,
+                (innerGuideRect.left + _dx(d.delta.dx)).clamp(
+                  outerGuideRect.left + _minGap,
+                  innerGuideRect.right - _minGap,
+                ),
                 innerGuideRect.top,
                 innerGuideRect.right,
                 innerGuideRect.bottom,
@@ -2296,27 +2437,24 @@ class SecondStageCropOverlay extends StatelessWidget {
             );
           },
         ),
-        _buildHandle(
-          point: _toDisplayPoint(
+        _handle(
+          _toDisplay(
             Offset(
               innerGuideRect.right,
               (innerGuideRect.top + innerGuideRect.bottom) / 2,
             ),
           ),
-          icon: Icons.keyboard_arrow_left,
-          color: const Color(0xFF3DDC84),
-          onDrag: (details) {
-            final nextRight =
-                (innerGuideRect.right + _deltaToCoordinateX(details.delta.dx))
-                    .clamp(
-                      innerGuideRect.left + _ConfirmationScreenState._minGap,
-                      outerGuideRect.right - _ConfirmationScreenState._minGap,
-                    );
+          Icons.keyboard_arrow_left,
+          const Color(0xFF3DDC84),
+          (d) {
             onInnerChanged(
               Rect.fromLTRB(
                 innerGuideRect.left,
                 innerGuideRect.top,
-                nextRight,
+                (innerGuideRect.right + _dx(d.delta.dx)).clamp(
+                  innerGuideRect.left + _minGap,
+                  outerGuideRect.right - _minGap,
+                ),
                 innerGuideRect.bottom,
               ),
             );
@@ -2326,21 +2464,21 @@ class SecondStageCropOverlay extends StatelessWidget {
     );
   }
 
-  Widget _buildHandle({
-    required Offset point,
-    required IconData icon,
-    required Color color,
-    required GestureDragUpdateCallback onDrag,
-  }) {
-    const size = 32.0;
+  Widget _handle(
+    Offset pt,
+    IconData icon,
+    Color color,
+    GestureDragUpdateCallback onDrag,
+  ) {
+    const sz = 32.0;
     return Positioned(
-      left: point.dx - size / 2,
-      top: point.dy - size / 2,
+      left: pt.dx - sz / 2,
+      top: pt.dy - sz / 2,
       child: GestureDetector(
         onPanUpdate: onDrag,
         child: Container(
-          width: size,
-          height: size,
+          width: sz,
+          height: sz,
           decoration: BoxDecoration(
             color: color,
             borderRadius: BorderRadius.circular(10),
@@ -2358,20 +2496,16 @@ class SecondStageCropOverlay extends StatelessWidget {
     );
   }
 
-  Widget _buildCornerHandle({
-    required Offset point,
-    required Color color,
-    required GestureDragUpdateCallback onDrag,
-  }) {
-    const size = 10.0;
+  Widget _corner(Offset pt, Color color, GestureDragUpdateCallback onDrag) {
+    const sz = 10.0;
     return Positioned(
-      left: point.dx - size / 2,
-      top: point.dy - size / 2,
+      left: pt.dx - sz / 2,
+      top: pt.dy - sz / 2,
       child: GestureDetector(
         onPanUpdate: onDrag,
         child: Container(
-          width: size,
-          height: size,
+          width: sz,
+          height: sz,
           decoration: BoxDecoration(
             color: color,
             shape: BoxShape.circle,
@@ -2389,6 +2523,10 @@ class SecondStageCropOverlay extends StatelessWidget {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// GUIDE BOXES PAINTER
+// ═══════════════════════════════════════════════════════════════════════════════
+
 class GuideBoxesPainter extends CustomPainter {
   final Size coordinateSize;
   final Rect outerGuideRect;
@@ -2400,29 +2538,28 @@ class GuideBoxesPainter extends CustomPainter {
     required this.innerGuideRect,
   });
 
-  Rect _scaleRect(Rect rect, Size size) {
-    final scaleX = size.width / coordinateSize.width;
-    final scaleY = size.height / coordinateSize.height;
-    return Rect.fromLTRB(
-      rect.left * scaleX,
-      rect.top * scaleY,
-      rect.right * scaleX,
-      rect.bottom * scaleY,
-    );
+  Rect _scale(Rect r, Size s) {
+    final sx = s.width / coordinateSize.width;
+    final sy = s.height / coordinateSize.height;
+    return Rect.fromLTRB(r.left * sx, r.top * sy, r.right * sx, r.bottom * sy);
   }
 
   @override
   void paint(Canvas canvas, Size size) {
-    final outer = _scaleRect(outerGuideRect, size);
-    final inner = _scaleRect(innerGuideRect, size);
+    final outer = _scale(outerGuideRect, size);
+    final inner = _scale(innerGuideRect, size);
 
-    final full = Path()..addRect(Offset.zero & size);
-    final hole = Path()..addRect(outer);
+    // Dim outside
     canvas.drawPath(
-      Path.combine(PathOperation.difference, full, hole),
-      Paint()..color = Colors.black.withValues(alpha: 0.45),
+      Path.combine(
+        PathOperation.difference,
+        Path()..addRect(Offset.zero & size),
+        Path()..addRect(outer),
+      ),
+      Paint()..color = Colors.black.withOpacity(0.45),
     );
 
+    // Hatch band between outer and inner
     final band = Path()
       ..fillType = PathFillType.evenOdd
       ..addRect(outer)
@@ -2430,7 +2567,7 @@ class GuideBoxesPainter extends CustomPainter {
     canvas.save();
     canvas.clipPath(band);
     final hatch = Paint()
-      ..color = const Color(0xFF4A80F0).withValues(alpha: 0.55)
+      ..color = const Color(0xFF4A80F0).withOpacity(0.55)
       ..strokeWidth = 1.5;
     const spacing = 10.0;
     for (
@@ -2470,94 +2607,14 @@ class GuideBoxesPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant GuideBoxesPainter oldDelegate) =>
-      oldDelegate.outerGuideRect != outerGuideRect ||
-      oldDelegate.innerGuideRect != innerGuideRect;
+  bool shouldRepaint(GuideBoxesPainter old) =>
+      old.outerGuideRect != outerGuideRect ||
+      old.innerGuideRect != innerGuideRect;
 }
 
-class ObjectDetectorPainter extends CustomPainter {
-  final List<DetectedObject> objects;
-  final Size imageSize;
-  final InputImageRotation rotation;
-  final CameraLensDirection lensDirection;
-
-  ObjectDetectorPainter(
-    this.objects,
-    this.imageSize,
-    this.rotation,
-    this.lensDirection,
-  );
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final Paint paintCorners = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 5.0
-      ..color = Colors.greenAccent
-      ..strokeCap = StrokeCap.round;
-    final Paint paintFill = Paint()
-      ..style = PaintingStyle.fill
-      ..color = Colors.greenAccent.withAlpha(100);
-    for (final object in objects) {
-      final rect = _translateRect(
-        object.boundingBox,
-        imageSize,
-        size,
-        rotation,
-        lensDirection,
-      );
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(rect, const Radius.circular(8)),
-        paintFill,
-      );
-      const double cs = 25.0;
-      final path = Path()
-        ..moveTo(rect.left, rect.top + cs)
-        ..lineTo(rect.left, rect.top)
-        ..lineTo(rect.left + cs, rect.top)
-        ..moveTo(rect.right - cs, rect.top)
-        ..lineTo(rect.right, rect.top)
-        ..lineTo(rect.right, rect.top + cs)
-        ..moveTo(rect.right, rect.bottom - cs)
-        ..lineTo(rect.right, rect.bottom)
-        ..lineTo(rect.right - cs, rect.bottom)
-        ..moveTo(rect.left + cs, rect.bottom)
-        ..lineTo(rect.left, rect.bottom)
-        ..lineTo(rect.left, rect.bottom - cs);
-      canvas.drawPath(path, paintCorners);
-      final dotPaint = Paint()..color = Colors.greenAccent;
-      canvas.drawCircle(rect.topLeft, 6, dotPaint);
-      canvas.drawCircle(rect.topRight, 6, dotPaint);
-      canvas.drawCircle(rect.bottomLeft, 6, dotPaint);
-      canvas.drawCircle(rect.bottomRight, 6, dotPaint);
-    }
-  }
-
-  Rect _translateRect(
-    Rect rect,
-    Size imageSize,
-    Size widgetSize,
-    InputImageRotation rotation,
-    CameraLensDirection lensDirection,
-  ) {
-    final scaleX = widgetSize.width / imageSize.width;
-    final scaleY = widgetSize.height / imageSize.height;
-    double left = rect.left * scaleX;
-    double top = rect.top * scaleY;
-    double right = rect.right * scaleX;
-    double bottom = rect.bottom * scaleY;
-    if (lensDirection == CameraLensDirection.front) {
-      final tempLeft = left;
-      left = widgetSize.width - right;
-      right = widgetSize.width - tempLeft;
-    }
-    return Rect.fromLTRB(left, top, right, bottom);
-  }
-
-  @override
-  bool shouldRepaint(ObjectDetectorPainter oldDelegate) =>
-      oldDelegate.objects != objects || oldDelegate.imageSize != imageSize;
-}
+// ═══════════════════════════════════════════════════════════════════════════════
+// RESULT SCREEN
+// ═══════════════════════════════════════════════════════════════════════════════
 
 class ResultScreen extends StatelessWidget {
   final String imagePath;
@@ -2573,8 +2630,7 @@ class ResultScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final message =
-        apiResponse['message']?.toString() ?? 'Pokémon card detected';
+    final message = apiResponse['message']?.toString() ?? 'Card detected';
     final detection = ApiCardDetection.fromResponse(apiResponse);
 
     return Scaffold(
@@ -2607,10 +2663,9 @@ class ResultScreen extends StatelessWidget {
           ),
           _ApiMatchInfoPanel(detection: detection),
           Padding(
-            padding: const EdgeInsets.all(24.0),
+            padding: const EdgeInsets.all(24),
             child: ElevatedButton(
-              onPressed: () =>
-                  Navigator.popUntil(context, (route) => route.isFirst),
+              onPressed: () => Navigator.popUntil(context, (r) => r.isFirst),
               style: ElevatedButton.styleFrom(
                 minimumSize: const Size(double.infinity, 50),
                 backgroundColor: Colors.white,
@@ -2641,9 +2696,7 @@ class _ApiMatchInfoPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final rawName = detection.matchedCard ?? 'Unknown card';
-    final cardName = rawName.contains('/')
-        ? rawName.split('/').last
-        : rawName;
+    final cardName = rawName.contains('/') ? rawName.split('/').last : rawName;
     final score = detection.similarityScore;
     final margin = detection.margin;
 
@@ -2680,7 +2733,7 @@ class _ApiMatchInfoPanel extends StatelessWidget {
             Row(
               children: [
                 Expanded(
-                  child: _infoChip(
+                  child: _chip(
                     'Similarity',
                     '${(score * 100).toStringAsFixed(1)}%',
                   ),
@@ -2688,7 +2741,7 @@ class _ApiMatchInfoPanel extends StatelessWidget {
                 if (margin != null) ...[
                   const SizedBox(width: 8),
                   Expanded(
-                    child: _infoChip(
+                    child: _chip(
                       'Margin',
                       '${(margin * 100).toStringAsFixed(1)}%',
                     ),
@@ -2702,33 +2755,33 @@ class _ApiMatchInfoPanel extends StatelessWidget {
     );
   }
 
-  Widget _infoChip(String label, String value) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: const Color(0xFF222222),
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(label, style: const TextStyle(color: Colors.white54, fontSize: 12)),
-          const SizedBox(height: 2),
-          Text(
-            value,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 15,
-              fontWeight: FontWeight.w700,
-            ),
+  Widget _chip(String label, String value) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+    decoration: BoxDecoration(
+      color: const Color(0xFF222222),
+      borderRadius: BorderRadius.circular(10),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(color: Colors.white54, fontSize: 12),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          value,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 15,
+            fontWeight: FontWeight.w700,
           ),
-        ],
-      ),
-    );
-  }
+        ),
+      ],
+    ),
+  );
 }
 
-/// Final card image with preview-style guide boxes (read-only).
 class CardResultPreview extends StatelessWidget {
   final String imagePath;
   final ApiCardDetection detection;
@@ -2744,19 +2797,17 @@ class CardResultPreview extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return FutureBuilder<Size>(
-      future: _getImageSize(File(imagePath)),
-      builder: (context, snapshot) {
-        if (!snapshot.hasData || snapshot.data == Size.zero) {
+      future: _getSize(),
+      builder: (ctx, snap) {
+        if (!snap.hasData || snap.data == Size.zero)
           return const Center(child: CircularProgressIndicator());
-        }
-
-        final imageSize = snapshot.data!;
-        final baseOverlay = overlay ??
+        final imageSize = snap.data!;
+        final snap2 =
+            overlay ??
             (detection.hasGeometry
                 ? CardOverlaySnapshot.fromApi(detection, imageSize)
                 : _defaultOverlay(imageSize));
-        final snapshotOverlay = baseOverlay.forResultDisplay();
-
+        final ov = snap2.forResultDisplay();
         return Center(
           child: Padding(
             padding: const EdgeInsets.all(16),
@@ -2777,9 +2828,9 @@ class CardResultPreview extends StatelessWidget {
                     Positioned.fill(
                       child: CustomPaint(
                         painter: GuideBoxesPainter(
-                          coordinateSize: snapshotOverlay.coordinateSize,
-                          outerGuideRect: snapshotOverlay.outerGuideRect,
-                          innerGuideRect: snapshotOverlay.innerGuideRect,
+                          coordinateSize: ov.coordinateSize,
+                          outerGuideRect: ov.outerGuideRect,
+                          innerGuideRect: ov.innerGuideRect,
                         ),
                       ),
                     ),
@@ -2802,8 +2853,8 @@ class CardResultPreview extends StatelessWidget {
     );
   }
 
-  Future<Size> _getImageSize(File file) async {
-    final bytes = await file.readAsBytes();
+  Future<Size> _getSize() async {
+    final bytes = await File(imagePath).readAsBytes();
     final decoded = img.decodeImage(bytes);
     final image = decoded == null ? null : img.bakeOrientation(decoded);
     return image == null

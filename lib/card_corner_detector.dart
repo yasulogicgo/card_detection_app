@@ -121,8 +121,9 @@ class CardCornerDetectionResult {
 /// Detects a playing-card-like quadrilateral using OpenCV contours.
 class CardCornerDetector {
   static const double _targetAspect = 0.714; // ~2.5:3.5 portrait card
-  static const double _minAreaFraction = 0.08;
-  static const double _maxAreaFraction = 0.55;
+  static const double _minAreaFraction = 0.05;
+  /// Cropped previews often fill most of the frame — 55% was rejecting real cards.
+  static const double _maxAreaFraction = 0.92;
 
   /// Runs contour-based card detection on [imageFile].
   static Future<CardCornerDetectionResult> detectFromFile(
@@ -221,16 +222,39 @@ class CardCornerDetector {
       );
 
       _CardCandidate? best;
+      final imageW = working.cols.toDouble();
+      final imageH = working.rows.toDouble();
+      final imageArea = working.cols * working.rows;
 
       for (final binary in _buildBinaryImages(blurred)) {
         best = _pickBestCandidate(
           binary,
-          imageArea: working.cols * working.rows,
+          imageArea: imageArea,
+          imageWidth: imageW,
+          imageHeight: imageH,
           scaledSearch: scaledSearch,
           currentBest: best,
+          contourMode: cv.RETR_EXTERNAL,
         );
         binary.dispose();
         if (best != null && best.score > 0.85) break;
+      }
+
+      // Cropped images: card edge is often not the outermost contour.
+      if (best == null) {
+        for (final binary in _buildBinaryImages(blurred)) {
+          best = _pickBestCandidate(
+            binary,
+            imageArea: imageArea,
+            imageWidth: imageW,
+            imageHeight: imageH,
+            scaledSearch: scaledSearch,
+            currentBest: best,
+            contourMode: cv.RETR_LIST,
+          );
+          binary.dispose();
+          if (best != null) break;
+        }
       }
 
       if (best == null) {
@@ -337,8 +361,11 @@ class CardCornerDetector {
   static _CardCandidate? _pickBestCandidate(
     cv.Mat binary, {
     required int imageArea,
+    required double imageWidth,
+    required double imageHeight,
     required Rect? scaledSearch,
     required _CardCandidate? currentBest,
+    required int contourMode,
   }) {
     cv.Mat? closed;
     try {
@@ -348,7 +375,7 @@ class CardCornerDetector {
 
       final (contours, _) = cv.findContours(
         closed,
-        cv.RETR_EXTERNAL,
+        contourMode,
         cv.CHAIN_APPROX_SIMPLE,
       );
 
@@ -367,6 +394,8 @@ class CardCornerDetector {
           corners: corners,
           area: area,
           imageArea: imageArea,
+          imageWidth: imageWidth,
+          imageHeight: imageHeight,
           scaledSearch: scaledSearch,
         );
         if (score <= 0) continue;
@@ -404,51 +433,35 @@ class CardCornerDetector {
     required List<Offset> corners,
     required double area,
     required int imageArea,
+    required double imageWidth,
+    required double imageHeight,
     required Rect? scaledSearch,
   }) {
     final bounds = _boundsFromCorners(corners);
 
     final w = bounds.width;
     final h = bounds.height;
+    final minImageDim = math.min(imageWidth, imageHeight);
 
-    if (w < 80 || h < 120) return 0;
+    if (w < minImageDim * 0.12 || h < minImageDim * 0.15) return 0;
 
-    // portrait card ratio
+    // Portrait card aspect (short/long), tolerant of perspective skew.
     final ratio = w < h ? w / h : h / w;
-
-    // strict ratio check
-    if (ratio < 0.55 || ratio > 0.80) {
-      return 0;
-    }
+    if (ratio < 0.50 || ratio > 0.88) return 0;
 
     final areaRatio = area / imageArea;
-    final center = Offset(
-      bounds.center.dx,
-      bounds.center.dy,
-    );
-
-    final imageCenter = Offset(
-      math.max(bounds.right, bounds.left),
-      math.max(bounds.bottom, bounds.top),
-    );
-
-    final dx = center.dx - imageCenter.dx / 2;
-    final dy = center.dy - imageCenter.dy / 2;
-
-    final distance =
-    math.sqrt(dx * dx + dy * dy);
-
-    if (distance > 500) {
+    if (areaRatio < _minAreaFraction || areaRatio > _maxAreaFraction) {
       return 0;
     }
 
-    // reject giant contour
-    if (areaRatio > 0.60) return 0;
+    final center = bounds.center;
+    final dx = center.dx - imageWidth / 2;
+    final dy = center.dy - imageHeight / 2;
+    final maxCenterDist =
+        math.sqrt(imageWidth * imageWidth + imageHeight * imageHeight) * 0.5;
+    final centerScore = 1.0 -
+        (math.sqrt(dx * dx + dy * dy) / maxCenterDist).clamp(0.0, 1.0);
 
-    // reject tiny contour
-    if (areaRatio < 0.08) return 0;
-
-    // angle check
     final tl = corners[0];
     final tr = corners[1];
     final br = corners[2];
@@ -456,46 +469,34 @@ class CardCornerDetector {
 
     final topWidth = (tr - tl).distance;
     final bottomWidth = (br - bl).distance;
-
     final leftHeight = (bl - tl).distance;
     final rightHeight = (br - tr).distance;
 
     final widthBalance =
-        math.min(topWidth, bottomWidth) /
-            math.max(topWidth, bottomWidth);
-
+        math.min(topWidth, bottomWidth) / math.max(topWidth, bottomWidth);
     final heightBalance =
-        math.min(leftHeight, rightHeight) /
-            math.max(leftHeight, rightHeight);
+        math.min(leftHeight, rightHeight) / math.max(leftHeight, rightHeight);
 
-    if (widthBalance < 0.6) return 0;
-    if (heightBalance < 0.6) return 0;
+    if (widthBalance < 0.50 || heightBalance < 0.50) return 0;
 
     double regionScore = 1.0;
-
     if (scaledSearch != null) {
-      final center = Offset(
+      final quadCenter = Offset(
         corners.map((e) => e.dx).reduce((a, b) => a + b) / 4,
         corners.map((e) => e.dy).reduce((a, b) => a + b) / 4,
       );
-
-      // HARD reject outside region
-      if (!scaledSearch.contains(center)) {
-        return 0;
-      }
-
-      regionScore = 1.5;
+      regionScore = scaledSearch.contains(quadCenter) ? 1.4 : 0.55;
     }
 
     final aspectScore =
-        1.0 - ((ratio - _targetAspect).abs() / _targetAspect);
+        1.0 - ((ratio - _targetAspect).abs() / _targetAspect).clamp(0.0, 1.0);
 
-    return
-      (aspectScore * 0.45) +
-          (areaRatio * 0.30) +
-          (widthBalance * 0.10) +
-          (heightBalance * 0.10) +
-          (regionScore * 0.05);
+    return (aspectScore * 0.40) +
+        (areaRatio.clamp(0.0, 1.0) * 0.25) +
+        (widthBalance * 0.10) +
+        (heightBalance * 0.10) +
+        (centerScore * 0.10) +
+        (regionScore * 0.05);
   }
 
   static Rect? _scaledSearchRegion(
@@ -506,7 +507,7 @@ class CardCornerDetector {
   ) {
     if (region == null) return null;
     final expanded = region.inflate(
-      math.max(region.width, region.height) * 0.35,
+      math.max(region.width, region.height) * 0.50,
     );
     return Rect.fromLTRB(
       (expanded.left * scale).clamp(0.0, maxW),
