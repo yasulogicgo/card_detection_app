@@ -2,6 +2,19 @@
 
 A new Flutter project.
 
+## Hugging Face API token (card detection)
+
+The app calls the Space at `detect-card` and may send `Authorization: Bearer …`
+only when a token is provided. **Do not put tokens in source control.**
+
+Run locally:
+
+```bash
+flutter run --dart-define=HF_API_TOKEN=your_hf_token
+```
+
+If a token was ever committed, **revoke it** in your Hugging Face account and create a new one.
+
 ## Getting Started
 
 This project is a starting point for a Flutter application.

@@ -4,7 +4,6 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:camera/camera.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_mlkit_object_detection/google_mlkit_object_detection.dart';
@@ -13,12 +12,9 @@ import 'package:http_parser/http_parser.dart';
 import 'package:image/image.dart' as img;
 import 'package:path_provider/path_provider.dart';
 import 'package:card_detacstion_app/api_card_detection.dart';
-import 'package:card_detacstion_app/api_detection_overlay.dart';
+import 'package:card_detacstion_app/api_config.dart';
 import 'package:card_detacstion_app/card_corner_detector.dart';
 import 'package:sensors_plus/sensors_plus.dart';
-
-const String kApiEndpoint =
-    "https://vidhilogicgo-card-detection.hf.space/detect-card-box";
 
 class CardScannerScreen extends StatefulWidget {
   const CardScannerScreen({super.key});
@@ -32,16 +28,20 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
   late ObjectDetector _objectDetector;
   bool _isProcessing = false;
   bool _isCapturing = false;
+  bool _isResumingStream = false;
 
   DetectedObject? _detectedObject;
   Size? _imageSize;
   InputImageRotation? _rotation;
 
-  // Sensor variables
+  // Sensor / gyroscope level variables
   StreamSubscription<AccelerometerEvent>? _accelerometerSubscription;
-  double _tiltX = 0;
-  double _tiltY = 0;
+  double _rollDeg = 0;
+  double _pitchDeg = 0;
   bool _isDeviceLevel = false;
+  bool _isHorizontalLevel = false;
+  bool _isVerticalLevel = false;
+  bool _showSpiritLevel = true;
 
   @override
   void initState() {
@@ -64,11 +64,16 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
       double tilt =
           math.acos(z / math.sqrt(x * x + y * y + z * z)) * (180 / math.pi);
 
+      final roll = math.atan2(x, z) * (180 / math.pi);
+      final pitch = math.atan2(y, z) * (180 / math.pi);
+
       setState(() {
-        _tiltX = x;
-        _tiltY = y;
-        // Consider level if tilt is within 10 degrees of being perfectly flat
-        _isDeviceLevel = tilt < 10.0;
+        _rollDeg = roll;
+        _pitchDeg = pitch;
+        _isHorizontalLevel = roll.abs() < 8.0;
+        _isVerticalLevel = pitch.abs() < 8.0;
+        _isDeviceLevel =
+            tilt < 10.0 && _isHorizontalLevel && _isVerticalLevel;
       });
     });
   }
@@ -225,6 +230,21 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
     return true;
   }
 
+  /// Camera2 on Android requires the image stream to stop before takePicture.
+  Future<void> _stopImageStreamSafely() async {
+    final controller = _cameraController;
+    if (controller == null || !controller.value.isInitialized) return;
+    if (!controller.value.isStreamingImages) return;
+
+    try {
+      await controller.stopImageStream();
+      // Let the capture session close before still capture / restart.
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+    } catch (e) {
+      debugPrint('Stop stream error: $e');
+    }
+  }
+
   Future<void> _captureImage() async {
     if (!_isDeviceLevel) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -235,11 +255,22 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
 
     if (_isCapturing ||
         _cameraController == null ||
-        !_cameraController!.value.isInitialized)
+        !_cameraController!.value.isInitialized) {
       return;
+    }
 
-    final currentRect = _detectedObject?.boundingBox;
-    final currentStreamSize = _imageSize;
+    if (_detectedObject == null || _imageSize == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Image not detected. Please try again.'),
+          duration: Duration(seconds: 3),
+        ),
+      );
+      return;
+    }
+
+    final currentRect = _detectedObject!.boundingBox;
+    final currentStreamSize = _imageSize!;
 
     setState(() {
       _isCapturing = true;
@@ -247,8 +278,15 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
     });
 
     try {
+      await _stopImageStreamSafely();
+
+      if (!mounted ||
+          _cameraController == null ||
+          !_cameraController!.value.isInitialized) {
+        return;
+      }
+
       final XFile file = await _cameraController!.takePicture();
-      await _cameraController!.stopImageStream();
 
       if (!mounted) return;
 
@@ -264,31 +302,115 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
       );
 
       if (mounted) {
-        _resumeStream();
+        await _resumeStream();
       }
     } catch (e) {
       debugPrint("Capture error: $e");
-      _resumeStream();
+      if (mounted) await _resumeStream();
     }
   }
 
-  void _resumeStream() {
-    if (mounted) {
-      setState(() {
-        _isCapturing = false;
-        _detectedObject = null;
-      });
-      _cameraController?.setFlashMode(
-        FlashMode.off,
-      ); // Ensure flash is off on resume
-      _cameraController?.startImageStream(_processCameraImage);
+  Future<void> _resumeStream() async {
+    if (!mounted || _isResumingStream) return;
+
+    final controller = _cameraController;
+    if (controller == null || !controller.value.isInitialized) {
+      if (mounted) {
+        setState(() {
+          _isCapturing = false;
+          _detectedObject = null;
+        });
+      }
+      return;
+    }
+
+    if (controller.value.isStreamingImages) {
+      if (mounted) {
+        setState(() {
+          _isCapturing = false;
+        });
+      }
+      return;
+    }
+
+    _isResumingStream = true;
+    try {
+      if (mounted) {
+        setState(() {
+          _isCapturing = false;
+          _detectedObject = null;
+        });
+      }
+
+      await controller.setFlashMode(FlashMode.off);
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+
+      if (!mounted || !controller.value.isInitialized) return;
+
+      await controller.startImageStream(_processCameraImage);
+    } catch (e) {
+      debugPrint('Resume stream error: $e');
+      await _reinitializeCamera();
+    } finally {
+      _isResumingStream = false;
+    }
+  }
+
+  Future<void> _reinitializeCamera() async {
+    final oldController = _cameraController;
+    _cameraController = null;
+
+    try {
+      if (oldController != null) {
+        if (oldController.value.isStreamingImages) {
+          await oldController.stopImageStream();
+        }
+        await oldController.dispose();
+      }
+    } catch (e) {
+      debugPrint('Dispose camera error: $e');
+    }
+
+    if (!mounted) return;
+
+    try {
+      final cameras = await availableCameras();
+      final backCamera = cameras.firstWhere(
+        (camera) => camera.lensDirection == CameraLensDirection.back,
+      );
+
+      _cameraController = CameraController(
+        backCamera,
+        ResolutionPreset.medium,
+        enableAudio: false,
+        imageFormatGroup: Platform.isAndroid
+            ? ImageFormatGroup.nv21
+            : ImageFormatGroup.bgra8888,
+      );
+
+      await _cameraController!.initialize();
+      await _cameraController!.setFlashMode(FlashMode.off);
+      await _cameraController!.lockCaptureOrientation(
+        DeviceOrientation.portraitUp,
+      );
+      await _cameraController!.startImageStream(_processCameraImage);
+
+      if (mounted) setState(() {});
+    } catch (e) {
+      debugPrint('Reinitialize camera error: $e');
     }
   }
 
   @override
   void dispose() {
     _accelerometerSubscription?.cancel();
-    _cameraController?.dispose();
+    final controller = _cameraController;
+    if (controller != null) {
+      if (controller.value.isStreamingImages) {
+        controller.stopImageStream().catchError((_) {});
+      }
+      controller.dispose();
+    }
     _objectDetector.close();
     super.dispose();
   }
@@ -332,108 +454,434 @@ class _CardScannerScreenState extends State<CardScannerScreen> {
               ),
             ),
 
-          // Stability / Level Indicator
+          // Card placement guide (grey scope + frame)
           if (!_isCapturing)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: CustomPaint(
+                  painter: CardGuideOverlayPainter(isLevel: _isDeviceLevel),
+                ),
+              ),
+            ),
+
+          // Spirit level bars — top (horizontal) & left (vertical), like reference UI
+          if (!_isCapturing && _showSpiritLevel) ...[
             Positioned(
-              top: 60,
+              top: MediaQuery.of(context).padding.top + 72,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: SpiritLevelBar(
+                  axis: SpiritLevelAxis.horizontal,
+                  isLevel: _isHorizontalLevel,
+                  tiltDegrees: _rollDeg,
+                ),
+              ),
+            ),
+            Positioned(
+              left: 10,
+              top: 0,
+              bottom: 0,
+              child: Center(
+                child: SpiritLevelBar(
+                  axis: SpiritLevelAxis.vertical,
+                  isLevel: _isVerticalLevel,
+                  tiltDegrees: _pitchDeg,
+                ),
+              ),
+            ),
+          ],
+
+          // Status chip when not level
+          if (!_isCapturing && !_isDeviceLevel)
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 16,
               left: 0,
               right: 0,
               child: Center(
                 child: Container(
                   padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 8,
+                    horizontal: 14,
+                    vertical: 6,
                   ),
                   decoration: BoxDecoration(
-                    color: _isDeviceLevel
-                        ? Colors.green.withOpacity(0.8)
-                        : Colors.red.withOpacity(0.8),
-                    borderRadius: BorderRadius.circular(20),
+                    color: Colors.black.withValues(alpha: 0.55),
+                    borderRadius: BorderRadius.circular(16),
                   ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        _isDeviceLevel ? Icons.check_circle : Icons.warning,
-                        color: Colors.white,
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        _isDeviceLevel ? "DEVICE LEVEL" : "HOLD PHONE FLAT",
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ],
+                  child: const Text(
+                    'HOLD PHONE FLAT',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 12,
+                      letterSpacing: 0.5,
+                    ),
                   ),
-                ),
-              ),
-            ),
-
-          // Bubble Level Visual
-          if (!_isCapturing)
-            Center(
-              child: Container(
-                width: 100,
-                height: 100,
-                decoration: BoxDecoration(
-                  border: Border.all(color: Colors.white24, width: 2),
-                  shape: BoxShape.circle,
-                ),
-                child: Stack(
-                  children: [
-                    Center(
-                      child: Container(
-                        width: 10,
-                        height: 10,
-                        decoration: const BoxDecoration(
-                          color: Colors.white24,
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                    ),
-                    AnimatedPositioned(
-                      duration: const Duration(milliseconds: 50),
-                      left: 45 + (_tiltX * 4),
-                      top: 45 + (_tiltY * 4),
-                      child: Container(
-                        width: 10,
-                        height: 10,
-                        decoration: BoxDecoration(
-                          color: _isDeviceLevel ? Colors.green : Colors.red,
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                    ),
-                  ],
                 ),
               ),
             ),
 
           Positioned(
-            bottom: 40,
-            left: 0,
-            right: 0,
-            child: Center(
-              child: _isCapturing
-                  ? const CircularProgressIndicator(color: Colors.white)
-                  : FloatingActionButton(
-                      onPressed: _captureImage,
-                      backgroundColor: _isDeviceLevel
-                          ? Colors.white
-                          : Colors.grey,
-                      child: Icon(
-                        Icons.camera_alt,
-                        color: _isDeviceLevel ? Colors.black : Colors.white54,
-                        size: 28,
+            bottom: 36,
+            left: 20,
+            right: 20,
+            child: Row(
+              children: [
+                const Spacer(flex: 2),
+                _isCapturing
+                    ? const CircularProgressIndicator(color: Colors.white)
+                    : FloatingActionButton(
+                        onPressed: _captureImage,
+                        backgroundColor: _isDeviceLevel
+                            ? Colors.white
+                            : Colors.grey,
+                        child: Icon(
+                          Icons.camera_alt,
+                          color: _isDeviceLevel
+                              ? Colors.black
+                              : Colors.white54,
+                          size: 28,
+                        ),
                       ),
+                const Spacer(),
+                Material(
+                  color: Colors.black.withValues(alpha: 0.45),
+                  shape: const CircleBorder(),
+                  child: IconButton(
+                    onPressed: () =>
+                        setState(() => _showSpiritLevel = !_showSpiritLevel),
+                    icon: Icon(
+                      Icons.straighten,
+                      color: _showSpiritLevel ? Colors.white : Colors.white38,
                     ),
+                    tooltip: 'Toggle level guides',
+                  ),
+                ),
+              ],
             ),
           ),
         ],
       ),
     );
+  }
+}
+
+enum SpiritLevelAxis { horizontal, vertical }
+
+/// Top / left spirit-level bar with moving dot (reference scanner UI).
+class SpiritLevelBar extends StatelessWidget {
+  final SpiritLevelAxis axis;
+  final bool isLevel;
+  final double tiltDegrees;
+
+  const SpiritLevelBar({
+    super.key,
+    required this.axis,
+    required this.isLevel,
+    required this.tiltDegrees,
+  });
+
+  static const double _barThickness = 20;
+  static const double _horizontalLength = 300;
+  static const double _verticalLength = 260;
+
+  @override
+  Widget build(BuildContext context) {
+    final isHorizontal = axis == SpiritLevelAxis.horizontal;
+    final size = isHorizontal
+        ? const Size(_horizontalLength, _barThickness)
+        : const Size(_barThickness, _verticalLength);
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 180),
+      width: size.width,
+      height: size.height,
+      child: CustomPaint(
+        painter: SpiritLevelBarPainter(
+          isHorizontal: isHorizontal,
+          isLevel: isLevel,
+          normalizedOffset: (tiltDegrees / 15.0).clamp(-1.0, 1.0),
+        ),
+      ),
+    );
+  }
+}
+
+class SpiritLevelBarPainter extends CustomPainter {
+  final bool isHorizontal;
+  final bool isLevel;
+
+  /// -1.0 -> left/top
+  ///  0.0 -> center
+  ///  1.0 -> right/bottom
+  final double normalizedOffset;
+
+  SpiritLevelBarPainter({
+    required this.isHorizontal,
+    required this.isLevel,
+    required this.normalizedOffset,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final barRect = RRect.fromRectAndRadius(
+      Offset.zero & size,
+      Radius.circular(size.height),
+    );
+
+    // ===== BACKGROUND BAR =====
+    final bgPaint = Paint()
+      ..shader = LinearGradient(
+        colors: [
+          const Color(0x8838FF72),
+          const Color(0x5525D366),
+        ],
+      ).createShader(Offset.zero & size);
+
+    canvas.drawRRect(barRect, bgPaint);
+
+    // ===== CENTER MARKERS =====
+    final markerPaint = Paint()
+      ..color = Colors.white
+      ..strokeWidth = 2;
+
+    if (isHorizontal) {
+      final centerX = size.width / 2;
+
+      canvas.drawLine(
+        Offset(centerX - 26, 0),
+        Offset(centerX - 26, size.height),
+        markerPaint,
+      );
+
+      canvas.drawLine(
+        Offset(centerX + 26, 0),
+        Offset(centerX + 26, size.height),
+        markerPaint,
+      );
+    } else {
+      final centerY = size.height / 2;
+
+      canvas.drawLine(
+        Offset(0, centerY - 26),
+        Offset(size.width, centerY - 26),
+        markerPaint,
+      );
+
+      canvas.drawLine(
+        Offset(0, centerY + 26),
+        Offset(size.width, centerY + 26),
+        markerPaint,
+      );
+    }
+
+    // ===== BALL POSITION =====
+    final t = ((normalizedOffset + 1) / 2).clamp(0.0, 1.0);
+
+    final bubbleCenter = isHorizontal
+        ? Offset(t * size.width, size.height / 2)
+        : Offset(size.width / 2, t * size.height);
+
+    // ===== GLOW =====
+    canvas.drawCircle(
+      bubbleCenter,
+      14,
+      Paint()
+        ..color = (isLevel
+            ? const Color(0xFF32FF32)
+            : Colors.orangeAccent)
+            .withOpacity(0.35)
+        ..maskFilter = const MaskFilter.blur(
+          BlurStyle.normal,
+          10,
+        ),
+    );
+
+    // ===== MAIN BALL =====
+    final bubblePaint = Paint()
+      ..shader = RadialGradient(
+        colors: [
+          Colors.white,
+          isLevel
+              ? const Color(0xFF32FF32)
+              : Colors.orangeAccent,
+        ],
+      ).createShader(
+        Rect.fromCircle(center: bubbleCenter, radius: 12),
+      );
+
+    canvas.drawCircle(
+      bubbleCenter,
+      12,
+      bubblePaint,
+    );
+
+    // ===== SMALL HIGHLIGHT =====
+    canvas.drawCircle(
+      bubbleCenter.translate(-3, -3),
+      3,
+      Paint()..color = Colors.white.withOpacity(0.9),
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant SpiritLevelBarPainter oldDelegate) {
+    return oldDelegate.normalizedOffset != normalizedOffset ||
+        oldDelegate.isLevel != isLevel ||
+        oldDelegate.isHorizontal != isHorizontal;
+  }
+}
+
+/// Grey scope + card frame in the center of the camera view.
+class CardGuideOverlayPainter extends CustomPainter {
+  final bool isLevel;
+
+  const CardGuideOverlayPainter({required this.isLevel});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final activeColor =
+        isLevel ? const Color(0xC572EA87) : const Color(0x7CF8766D);
+
+    final cardHeight = size.height * 0.56;
+    final cardWidth = cardHeight * 0.72;
+    final cardRect = Rect.fromCenter(
+      center: center,
+      width: cardWidth,
+      height: cardHeight,
+    );
+
+    final dimPath = Path()
+      ..addRect(Offset.zero & size)
+      ..addRRect(RRect.fromRectAndRadius(cardRect, const Radius.circular(10)))
+      ..fillType = PathFillType.evenOdd;
+    canvas.drawPath(
+      dimPath,
+      Paint()..color = Colors.black.withValues(alpha: 0.4),
+    );
+
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(cardRect, const Radius.circular(10)),
+      Paint()
+        ..color = activeColor.withValues(alpha: 0.85)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2,
+    );
+
+    _drawCornerBrackets(canvas, cardRect, activeColor);
+  }
+
+  void _drawCornerBrackets(Canvas canvas, Rect rect, Color color) {
+    const len = 20.0;
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 3
+      ..strokeCap = StrokeCap.round;
+
+    canvas.drawLine(rect.topLeft, rect.topLeft + const Offset(len, 0), paint);
+    canvas.drawLine(rect.topLeft, rect.topLeft + const Offset(0, len), paint);
+    canvas.drawLine(rect.topRight, rect.topRight + const Offset(-len, 0), paint);
+    canvas.drawLine(rect.topRight, rect.topRight + const Offset(0, len), paint);
+    canvas.drawLine(
+      rect.bottomLeft,
+      rect.bottomLeft + const Offset(len, 0),
+      paint,
+    );
+    canvas.drawLine(
+      rect.bottomLeft,
+      rect.bottomLeft + const Offset(0, -len),
+      paint,
+    );
+    canvas.drawLine(
+      rect.bottomRight,
+      rect.bottomRight + const Offset(-len, 0),
+      paint,
+    );
+    canvas.drawLine(
+      rect.bottomRight,
+      rect.bottomRight + const Offset(0, -len),
+      paint,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant CardGuideOverlayPainter oldDelegate) =>
+      oldDelegate.isLevel != isLevel;
+}
+
+/// Guide boxes in image pixel space for read-only result display.
+class CardOverlaySnapshot {
+  static const double guideInnerInset = 20.0;
+
+  final Size coordinateSize;
+  final Rect outerGuideRect;
+  final Rect innerGuideRect;
+
+  const CardOverlaySnapshot({
+    required this.coordinateSize,
+    required this.outerGuideRect,
+    required this.innerGuideRect,
+  });
+
+  CardOverlaySnapshot forResultDisplay() => this;
+
+  /// Green inner box = [outer] inset by exactly [inset] on all sides (scaled if needed).
+  static Rect innerRectFromOuter(
+    Rect outer,
+    Size bounds, {
+    double inset = guideInnerInset,
+    double insetScaleX = 1.0,
+    double insetScaleY = 1.0,
+  }) {
+    final dx = inset * insetScaleX;
+    final dy = inset * insetScaleY;
+    var left = outer.left + dx;
+    var top = outer.top + dy;
+    var right = outer.right - dx;
+    var bottom = outer.bottom - dy;
+
+    if (right - left < 12 || bottom - top < 12) {
+      final fallback = inset.clamp(0.0, outer.shortestSide / 4);
+      left = outer.left + fallback;
+      top = outer.top + fallback;
+      right = outer.right - fallback;
+      bottom = outer.bottom - fallback;
+    }
+
+    return Rect.fromLTRB(
+      left.clamp(outer.left, bounds.width),
+      top.clamp(outer.top, bounds.height),
+      right.clamp(outer.left, bounds.width),
+      bottom.clamp(outer.top, bounds.height),
+    );
+  }
+
+  factory CardOverlaySnapshot.fromApi(
+    ApiCardDetection detection,
+    Size imageSize,
+  ) {
+    final outer = detection.outerBox ??
+        Rect.fromLTWH(0, 0, imageSize.width, imageSize.height);
+    return CardOverlaySnapshot(
+      coordinateSize: imageSize,
+      outerGuideRect: outer,
+      innerGuideRect: innerRectFromOuter(outer, imageSize),
+    );
+  }
+
+  static Rect _boundsFromCorners(List<Offset> corners) {
+    var minX = corners.first.dx;
+    var maxX = corners.first.dx;
+    var minY = corners.first.dy;
+    var maxY = corners.first.dy;
+    for (final p in corners) {
+      minX = math.min(minX, p.dx);
+      maxX = math.max(maxX, p.dx);
+      minY = math.min(minY, p.dy);
+      maxY = math.max(maxY, p.dy);
+    }
+    return Rect.fromLTRB(minX, minY, maxX, maxY);
   }
 }
 
@@ -477,6 +925,7 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
   Size? _previewCoordinateSize;
   bool _isFirstCropApplied = false;
   List<Offset>? _opencvCorners;
+  CardCornerValidation? _cornerValidation;
   bool _isAutoScanning = false;
 
   /// Green inner (main) box: this many pixels inside the purple outer box.
@@ -590,17 +1039,78 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
     }
   }
 
+  Future<CardOverlaySnapshot?> _overlaySnapshotForImage({
+    required Size imageSize,
+    _CropResult? finalCrop,
+    Rect? outerInPreview,
+  }) async {
+    if (finalCrop != null &&
+        outerInPreview != null &&
+        _previewCoordinateSize != null) {
+      final outer = Rect.fromLTWH(
+        0,
+        0,
+        finalCrop.croppedSize.width,
+        finalCrop.croppedSize.height,
+      );
+      return CardOverlaySnapshot(
+        coordinateSize: finalCrop.croppedSize,
+        outerGuideRect: outer,
+        innerGuideRect: CardOverlaySnapshot.innerRectFromOuter(
+          outer,
+          finalCrop.croppedSize,
+        ),
+      );
+    }
+
+    if (_guideOuterRect != null && _previewCoordinateSize != null) {
+      final scaleX = imageSize.width / _previewCoordinateSize!.width;
+      final scaleY = imageSize.height / _previewCoordinateSize!.height;
+      final outer = Rect.fromLTRB(
+        _guideOuterRect!.left * scaleX,
+        _guideOuterRect!.top * scaleY,
+        _guideOuterRect!.right * scaleX,
+        _guideOuterRect!.bottom * scaleY,
+      );
+      return CardOverlaySnapshot(
+        coordinateSize: imageSize,
+        outerGuideRect: outer,
+        innerGuideRect: CardOverlaySnapshot.innerRectFromOuter(
+          outer,
+          imageSize,
+          insetScaleX: scaleX,
+          insetScaleY: scaleY,
+        ),
+      );
+    }
+
+    if (_detectedRectOriginal != null) {
+      final detected = _detectedRectOriginal!;
+      final outer = detected.inflate(24);
+      return CardOverlaySnapshot(
+        coordinateSize: imageSize,
+        outerGuideRect: outer,
+        innerGuideRect: CardOverlaySnapshot.innerRectFromOuter(outer, imageSize),
+      );
+    }
+
+    return null;
+  }
+
   Future<void> _onCheckPressed() async {
     setState(() => _isUploading = true);
 
     try {
       File imageToUpload;
+      _CropResult? finalCrop;
+      Rect? outerUsedForCrop;
+      CardOverlaySnapshot? overlaySnapshot;
 
       if (_isFirstCropApplied &&
           _guideOuterRect != null &&
           _previewCoordinateSize != null) {
-        // PERFORM FINAL PRECISION CROP based on Outer Guide
-        final finalCrop = await _cropRectFromImage(
+        outerUsedForCrop = _guideOuterRect;
+        finalCrop = await _cropRectFromImage(
           sourcePath: _croppedPath ?? widget.imagePath,
           cropRect: _guideOuterRect!,
           coordinateSpace: _previewCoordinateSize!,
@@ -608,36 +1118,73 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
         );
         if (finalCrop == null) return;
         imageToUpload = finalCrop.file;
+        overlaySnapshot = await _overlaySnapshotForImage(
+          imageSize: finalCrop.croppedSize,
+          finalCrop: finalCrop,
+          outerInPreview: outerUsedForCrop,
+        );
       } else {
-        // Fallback to current available image
         imageToUpload = File(_croppedPath ?? widget.imagePath);
+        final imageSize = await _getImageSize(imageToUpload);
+        overlaySnapshot = await _overlaySnapshotForImage(imageSize: imageSize);
       }
 
       final response = await _uploadImage(imageToUpload);
       if (!mounted) return;
 
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (_) => ResultScreen(
-            imagePath: imageToUpload.path,
-            apiResponse: response,
+      final detection = ApiCardDetection.fromResponse(response);
+      final apiMessage = response['message']?.toString();
+
+      if (response['success'] == true && detection.isDetected) {
+        if (overlaySnapshot == null) {
+          final imageSize = await _getImageSize(imageToUpload);
+          if (detection.hasGeometry) {
+            overlaySnapshot =
+                CardOverlaySnapshot.fromApi(detection, imageSize);
+          }
+        }
+
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => ResultScreen(
+              imagePath: imageToUpload.path,
+              apiResponse: response,
+              overlay: overlaySnapshot?.forResultDisplay(),
+            ),
           ),
+        );
+        return;
+      }
+
+      final failureMessage = apiMessage?.isNotEmpty == true
+          ? apiMessage!
+          : 'Not a Pokémon card';
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(failureMessage),
+          duration: const Duration(seconds: 3),
         ),
       );
+      if (mounted) Navigator.pop(context);
     } catch (e) {
       debugPrint("API Error: $e");
-      if (mounted)
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text("Error: $e")));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Error: $e")),
+        );
+      }
     } finally {
       if (mounted) setState(() => _isUploading = false);
     }
   }
 
   Future<Map<String, dynamic>> _uploadImage(File imageFile) async {
-    var request = http.MultipartRequest('POST', Uri.parse(kApiEndpoint));
+    var request = http.MultipartRequest('POST', Uri.parse(kDetectCardEndpoint));
+    if (kHfApiToken.isNotEmpty) {
+      request.headers['Authorization'] = 'Bearer $kHfApiToken';
+    }
     request.files.add(
       await http.MultipartFile.fromPath(
         'file',
@@ -646,7 +1193,14 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
       ),
     );
     var response = await http.Response.fromStream(await request.send());
-    if (response.statusCode == 200) return json.decode(response.body);
+
+    debugPrint("API Response Body: ${response.body}");
+
+    if (response.statusCode == 200) {
+      final decoded = json.decode(response.body);
+      if (decoded is Map<String, dynamic>) return decoded;
+      return {"success": false, "message": "Invalid response format"};
+    }
     return {
       "success": false,
       "message": "Server error: ${response.statusCode}",
@@ -697,23 +1251,9 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
     _guideInnerRect = _innerRectFromOuter(_guideOuterRect!, croppedSize);
   }
 
-  /// Inner guide = outer inset by exactly [_guideInnerInset] on all sides.
+  /// Inner guide = outer inset by exactly 20px on all sides.
   Rect _innerRectFromOuter(Rect outer, Size bounds) {
-    final inner = Rect.fromLTRB(
-      outer.left + _guideInnerInset,
-      outer.top + _guideInnerInset,
-      outer.right - _guideInnerInset,
-      outer.bottom - _guideInnerInset,
-    );
-    if (inner.width < _minGap || inner.height < _minGap) {
-      return outer.deflate(_guideInnerInset.clamp(0, outer.shortestSide / 4));
-    }
-    return Rect.fromLTRB(
-      inner.left.clamp(0.0, bounds.width),
-      inner.top.clamp(0.0, bounds.height),
-      inner.right.clamp(0.0, bounds.width),
-      inner.bottom.clamp(0.0, bounds.height),
-    );
+    return CardOverlaySnapshot.innerRectFromOuter(outer, bounds);
   }
 
   void _onOuterGuideChanged(Rect outer) {
@@ -732,6 +1272,28 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
       _guideOuterRect = clamped;
       _guideInnerRect = _innerRectFromOuter(clamped, bounds);
     });
+  }
+
+  bool _consumeOpenCvResult(
+    CardCornerDetectionResult result, {
+    required VoidCallback onValid,
+  }) {
+    setState(() => _cornerValidation = result.cornerValidation);
+
+    if (!result.success) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            result.errorMessage ?? 'Card not detected — retake or rescan',
+          ),
+          duration: const Duration(seconds: 4),
+        ),
+      );
+      return false;
+    }
+
+    onValid();
+    return true;
   }
 
   Future<void> _handleAutoScan() async {
@@ -757,21 +1319,11 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
 
       if (!mounted) return;
 
-      if (!result.success) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              result.errorMessage ?? 'Card not detected',
-            ),
-          ),
-        );
-        return;
-      }
-
       // =========================
       // FIRST AUTO SCAN
       // =========================
       if (!_isFirstCropApplied) {
+        if (!_consumeOpenCvResult(result, onValid: () {})) return;
         final photoSize =
             _previewCoordinateSize ??
                 await _getImageSize(File(widget.imagePath));
@@ -804,67 +1356,48 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
 
         if (!mounted) return;
 
-        if (!refined.success) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                refined.errorMessage ??
-                    'Crop applied. Adjust manually.',
-              ),
-            ),
-          );
+        if (!_consumeOpenCvResult(
+          refined,
+          onValid: () {
+            final bounds = _previewCoordinateSize;
+            if (bounds == null) return;
+
+            final refinedBounds = _boundsFromCorners(refined.corners);
+
+            setState(() {
+              _guideOuterRect = refinedBounds;
+              _guideInnerRect = _innerRectFromOuter(refinedBounds, bounds);
+              _opencvCorners = refined.corners;
+              _initialOuterGuide = _guideOuterRect;
+              _initialInnerGuide = _guideInnerRect;
+            });
+          },
+        )) {
           return;
         }
-
-        final bounds = _previewCoordinateSize;
-
-        if (bounds == null) return;
-
-        final refinedBounds =
-        _boundsFromCorners(refined.corners);
-
-        setState(() {
-          // PURPLE BOX
-          _guideOuterRect = refinedBounds;
-
-          // GREEN BOX
-          _guideInnerRect = _innerRectFromOuter(
-            refinedBounds,
-            bounds,
-          );
-
-          // ORANGE POLYGON
-          _opencvCorners = refined.corners;
-
-          _initialOuterGuide = _guideOuterRect;
-          _initialInnerGuide = _guideInnerRect;
-        });
       }
 
       // =========================
       // AFTER FIRST CROP
       // =========================
       else {
-        final bounds = _previewCoordinateSize;
+        if (!_consumeOpenCvResult(
+          result,
+          onValid: () {
+            final bounds = _previewCoordinateSize;
+            if (bounds == null) return;
 
-        if (bounds == null) return;
+            final resultBounds = _boundsFromCorners(result.corners);
 
-        final resultBounds =
-        _boundsFromCorners(result.corners);
-
-        setState(() {
-          // PURPLE BOX
-          _guideOuterRect = resultBounds;
-
-          // GREEN BOX
-          _guideInnerRect = _innerRectFromOuter(
-            resultBounds,
-            bounds,
-          );
-
-          // ORANGE POLYGON
-          _opencvCorners = result.corners;
-        });
+            setState(() {
+              _guideOuterRect = resultBounds;
+              _guideInnerRect = _innerRectFromOuter(resultBounds, bounds);
+              _opencvCorners = result.corners;
+            });
+          },
+        )) {
+          return;
+        }
       }
     } catch (e) {
       debugPrint('Auto Scan Error: $e');
@@ -984,7 +1517,6 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                               coordinateSize: _previewCoordinateSize!,
                               outerGuideRect: _guideOuterRect!,
                               innerGuideRect: _guideInnerRect!,
-                              cardCorners: _opencvCorners,
                               onOuterChanged: _onOuterGuideChanged,
                               onInnerChanged: (rect) =>
                                   setState(() => _guideInnerRect = rect),
@@ -1025,7 +1557,6 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                                     imageBounds: displayRect,
                                     coordinateSize: _previewCoordinateSize!,
                                     detectedRect: _detectedRectOriginal!,
-                                    cardCorners: _opencvCorners,
                                     onBackgroundTap: _handleFirstCrop,
                                   );
                                 },
@@ -1044,91 +1575,95 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
             ),
             child: _isUploading || _isAutoScanning
                 ? const Center(child: CircularProgressIndicator())
-                : Row(
+                : Column(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      Expanded(
-                        child: OutlinedButton(
-                          onPressed: () => Navigator.pop(context),
-                          style: OutlinedButton.styleFrom(
-                            minimumSize: const Size(0, 50),
-                            side: const BorderSide(
-                              color: Colors.white,
-                              width: 2,
-                            ),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton(
+                              onPressed: () => Navigator.pop(context),
+                              style: OutlinedButton.styleFrom(
+                                minimumSize: const Size(0, 48),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                ),
+                                side: const BorderSide(
+                                  color: Colors.white,
+                                  width: 2,
+                                ),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                              ),
+                              child: _previewActionLabel(
+                                'Retake',
+                                color: Colors.white,
+                              ),
                             ),
                           ),
-                          child: const Text(
-                            "Retake",
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold,
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: ElevatedButton(
+                              onPressed: _isFirstCropApplied
+                                  ? () {
+                                      if (_initialOuterGuide != null &&
+                                          _previewCoordinateSize != null) {
+                                        setState(() {
+                                          _guideOuterRect = _initialOuterGuide;
+                                          _guideInnerRect = _innerRectFromOuter(
+                                            _initialOuterGuide!,
+                                            _previewCoordinateSize!,
+                                          );
+                                        });
+                                      }
+                                    }
+                                  : _handleFirstCrop,
+                              style: ElevatedButton.styleFrom(
+                                minimumSize: const Size(0, 48),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                ),
+                                backgroundColor: const Color(0xFF4A80F0),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                              ),
+                              child: _previewActionLabel(
+                                _isFirstCropApplied ? 'ML Crop' : 'ML Crop',
+                                color: Colors.white,
+                              ),
                             ),
                           ),
-                        ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: ElevatedButton(
+                              onPressed: _onCheckPressed,
+                              style: ElevatedButton.styleFrom(
+                                minimumSize: const Size(0, 48),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                ),
+                                backgroundColor: Colors.white,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                              ),
+                              child: _previewActionLabel(
+                                _isFirstCropApplied ? 'Api Check' : 'Api Check',
+                                color: Colors.black,
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
-                      const SizedBox(width: 8),
-                      // When first crop is applied allow Reset, otherwise show Crop
-                      Expanded(
-                        child: ElevatedButton(
-                          onPressed: _isFirstCropApplied
-                              ? () {
-                                  // Reset guides to initial mapped guides
-                                  // Reset guides to initial mapped guides
-                                  if (_initialOuterGuide != null &&
-                                      _previewCoordinateSize != null) {
-                                    setState(() {
-                                      _guideOuterRect = _initialOuterGuide;
-                                      _guideInnerRect = _innerRectFromOuter(
-                                        _initialOuterGuide!,
-                                        _previewCoordinateSize!,
-                                      );
-                                    });
-                                  }
-                                }
-                              : _handleFirstCrop,
-                          style: ElevatedButton.styleFrom(
-                            minimumSize: const Size(0, 50),
-                            backgroundColor: const Color(0xFF4A80F0),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                          ),
-                          child: Text(
-                            _isFirstCropApplied ? "Reset" : "Crop",
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: ElevatedButton(
-                          onPressed: _onCheckPressed,
-                          style: ElevatedButton.styleFrom(
-                            minimumSize: const Size(0, 50),
-                            backgroundColor: Colors.white,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                          ),
-                          child: Text(
-                            _isFirstCropApplied ? "Confirm" : "Check",
-                            style: const TextStyle(
-                              color: Colors.black,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ),
-                      ),
-                      Expanded(
-                        child: OutlinedButton(
+                      const SizedBox(height: 8),
+                      SizedBox(
+                        width: double.infinity,
+                        child: OutlinedButton.icon(
                           onPressed: _handleAutoScan,
                           style: OutlinedButton.styleFrom(
-                            minimumSize: const Size(0, 50),
+                            minimumSize: const Size(0, 48),
                             side: const BorderSide(
                               color: Colors.white,
                               width: 2,
@@ -1137,18 +1672,72 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                               borderRadius: BorderRadius.circular(12),
                             ),
                           ),
-                          child: const Text(
-                            "Auto Scan",
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold,
-                            ),
+                          icon: const Icon(
+                            Icons.document_scanner_outlined,
+                            color: Colors.white,
+                            size: 20,
+                          ),
+                          label: _previewActionLabel(
+                            'OpenCV Auto Scan',
+                            color: Colors.white,
                           ),
                         ),
                       ),
                     ],
                   ),
           ),
+          if (_cornerValidation != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 12,
+                ),
+                decoration: BoxDecoration(
+                  color: _cornerValidation!.isValid
+                      ? const Color(0xFF1A3324)
+                      : const Color(0xFF3A1A1A),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: _cornerValidation!.isValid
+                        ? const Color(0xFF3DDC84)
+                        : const Color(0xFFFF5252),
+                    width: 1.5,
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _cornerValidation!.isValid
+                          ? 'OpenCV corners valid'
+                          : 'OpenCV corners invalid — rescan',
+                      style: TextStyle(
+                        color: _cornerValidation!.isValid
+                            ? const Color(0xFF3DDC84)
+                            : const Color(0xFFFF5252),
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Max X/Y defect: '
+                      '${_cornerValidation!.maxAxisDefectPx.toStringAsFixed(1)} px '
+                      '(limit ${CardCornerValidator.maxDefect.toInt()}) · Max angle: '
+                      '${_cornerValidation!.maxAngleDefectDeg.toStringAsFixed(1)}° '
+                      '(limit ${CardCornerValidator.maxDefect.toInt()})',
+                      style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           if (_isFirstCropApplied &&
               _croppedPath != null &&
               _guideOuterRect != null &&
@@ -1159,23 +1748,25 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                 children: [
                   Expanded(
                     child: _buildMetricCard(
-                      'Left / Right',
+                      'Horizontal',
                       _formatSplitValue(
                         _guideInnerRect!.left - _guideOuterRect!.left,
                         _guideOuterRect!.right - _guideInnerRect!.right,
                       ),
                       icon: Icons.swap_horiz,
+                      subtitle: 'Left · Right',
                     ),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
                     child: _buildMetricCard(
-                      'Top / Bottom',
+                      'Vertical',
                       _formatSplitValue(
                         _guideInnerRect!.top - _guideOuterRect!.top,
                         _guideOuterRect!.bottom - _guideInnerRect!.bottom,
                       ),
                       icon: Icons.swap_vert,
+                      subtitle: 'Top · Bottom',
                     ),
                   ),
                 ],
@@ -1204,7 +1795,28 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
     );
   }
 
-  Widget _buildMetricCard(String title, String value, {IconData? icon}) {
+  Widget _previewActionLabel(String text, {required Color color}) {
+    return Text(
+      text,
+      maxLines: 1,
+      softWrap: false,
+      overflow: TextOverflow.ellipsis,
+      textAlign: TextAlign.center,
+      style: TextStyle(
+        color: color,
+        fontSize: 14,
+        fontWeight: FontWeight.bold,
+        letterSpacing: 0.2,
+      ),
+    );
+  }
+
+  Widget _buildMetricCard(
+    String title,
+    String value, {
+    IconData? icon,
+    String? subtitle,
+  }) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       decoration: BoxDecoration(
@@ -1223,18 +1835,35 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
               children: [
                 Text(
                   title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     color: Colors.white70,
                     fontSize: 13,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
+                if (subtitle != null) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white38,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 4),
                 Text(
                   value,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     color: Colors.white,
-                    fontSize: 20,
+                    fontSize: 16,
                     fontWeight: FontWeight.w700,
                   ),
                 ),
@@ -1268,7 +1897,6 @@ class CropEditorOverlay extends StatelessWidget {
   final Rect imageBounds;
   final Size coordinateSize;
   final Rect detectedRect;
-  final List<Offset>? cardCorners;
   final VoidCallback onBackgroundTap;
 
   const CropEditorOverlay({
@@ -1276,7 +1904,6 @@ class CropEditorOverlay extends StatelessWidget {
     required this.imageBounds,
     required this.coordinateSize,
     required this.detectedRect,
-    this.cardCorners,
     required this.onBackgroundTap,
   });
 
@@ -1290,7 +1917,6 @@ class CropEditorOverlay extends StatelessWidget {
           imageBounds: imageBounds,
           coordinateSize: coordinateSize,
           detectedRect: detectedRect,
-          cardCorners: cardCorners,
         ),
       ),
     );
@@ -1301,13 +1927,11 @@ class CropOverlayPainter extends CustomPainter {
   final Rect imageBounds;
   final Size coordinateSize;
   final Rect detectedRect;
-  final List<Offset>? cardCorners;
 
   const CropOverlayPainter({
     required this.imageBounds,
     required this.coordinateSize,
     required this.detectedRect,
-    this.cardCorners,
   });
 
   @override
@@ -1327,40 +1951,11 @@ class CropOverlayPainter extends CustomPainter {
         ..style = PaintingStyle.stroke
         ..strokeWidth = 3,
     );
-
-    if (cardCorners != null && cardCorners!.length == 4) {
-      final displayCorners = cardCorners!
-          .map(
-            (p) => Offset(
-              imageBounds.left + (p.dx * scaleX),
-              imageBounds.top + (p.dy * scaleY),
-            ),
-          )
-          .toList();
-      final path = Path()
-        ..moveTo(displayCorners[0].dx, displayCorners[0].dy)
-        ..lineTo(displayCorners[1].dx, displayCorners[1].dy)
-        ..lineTo(displayCorners[2].dx, displayCorners[2].dy)
-        ..lineTo(displayCorners[3].dx, displayCorners[3].dy)
-        ..close();
-      canvas.drawPath(
-        path,
-        Paint()
-          ..color = Colors.orangeAccent
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 2.5,
-      );
-      final dotPaint = Paint()..color = Colors.orangeAccent;
-      for (final p in displayCorners) {
-        canvas.drawCircle(p, 6, dotPaint);
-      }
-    }
   }
 
   @override
   bool shouldRepaint(covariant CropOverlayPainter oldDelegate) =>
-      oldDelegate.detectedRect != detectedRect ||
-      oldDelegate.cardCorners != cardCorners;
+      oldDelegate.detectedRect != detectedRect;
 }
 
 class SecondStageCropOverlay extends StatelessWidget {
@@ -1368,7 +1963,6 @@ class SecondStageCropOverlay extends StatelessWidget {
   final Size coordinateSize;
   final Rect outerGuideRect;
   final Rect innerGuideRect;
-  final List<Offset>? cardCorners;
   final ValueChanged<Rect> onOuterChanged;
   final ValueChanged<Rect> onInnerChanged;
 
@@ -1378,7 +1972,6 @@ class SecondStageCropOverlay extends StatelessWidget {
     required this.coordinateSize,
     required this.outerGuideRect,
     required this.innerGuideRect,
-    this.cardCorners,
     required this.onOuterChanged,
     required this.onInnerChanged,
   });
@@ -1408,7 +2001,6 @@ class SecondStageCropOverlay extends StatelessWidget {
               coordinateSize: coordinateSize,
               outerGuideRect: outerGuideRect,
               innerGuideRect: innerGuideRect,
-              cardCorners: cardCorners,
             ),
           ),
         ),
@@ -1760,7 +2352,7 @@ class SecondStageCropOverlay extends StatelessWidget {
               ),
             ],
           ),
-          child: Icon(icon, color: Colors.white, size: 12),
+          child: Icon(icon, color: Colors.white, size: 18),
         ),
       ),
     );
@@ -1801,13 +2393,11 @@ class GuideBoxesPainter extends CustomPainter {
   final Size coordinateSize;
   final Rect outerGuideRect;
   final Rect innerGuideRect;
-  final List<Offset>? cardCorners;
 
   const GuideBoxesPainter({
     required this.coordinateSize,
     required this.outerGuideRect,
     required this.innerGuideRect,
-    this.cardCorners,
   });
 
   Rect _scaleRect(Rect rect, Size size) {
@@ -1877,38 +2467,12 @@ class GuideBoxesPainter extends CustomPainter {
         ..style = PaintingStyle.stroke
         ..strokeWidth = 2,
     );
-
-    if (cardCorners != null && cardCorners!.length == 4) {
-      final scaleX = size.width / coordinateSize.width;
-      final scaleY = size.height / coordinateSize.height;
-      final pts = cardCorners!
-          .map((p) => Offset(p.dx * scaleX, p.dy * scaleY))
-          .toList();
-      final path = Path()
-        ..moveTo(pts[0].dx, pts[0].dy)
-        ..lineTo(pts[1].dx, pts[1].dy)
-        ..lineTo(pts[2].dx, pts[2].dy)
-        ..lineTo(pts[3].dx, pts[3].dy)
-        ..close();
-      canvas.drawPath(
-        path,
-        Paint()
-          ..color = Colors.orangeAccent
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 2.5,
-      );
-      final dotPaint = Paint()..color = Colors.orangeAccent;
-      for (final p in pts) {
-        canvas.drawCircle(p, 5, dotPaint);
-      }
-    }
   }
 
   @override
   bool shouldRepaint(covariant GuideBoxesPainter oldDelegate) =>
       oldDelegate.outerGuideRect != outerGuideRect ||
-      oldDelegate.innerGuideRect != innerGuideRect ||
-      oldDelegate.cardCorners != cardCorners;
+      oldDelegate.innerGuideRect != innerGuideRect;
 }
 
 class ObjectDetectorPainter extends CustomPainter {
@@ -1998,63 +2562,55 @@ class ObjectDetectorPainter extends CustomPainter {
 class ResultScreen extends StatelessWidget {
   final String imagePath;
   final Map<String, dynamic> apiResponse;
+  final CardOverlaySnapshot? overlay;
 
   const ResultScreen({
     super.key,
     required this.imagePath,
     required this.apiResponse,
+    this.overlay,
   });
 
   @override
   Widget build(BuildContext context) {
-    final success = apiResponse['success'] == true;
-    final message = apiResponse['message']?.toString() ?? 'Unknown error';
+    final message =
+        apiResponse['message']?.toString() ?? 'Pokémon card detected';
     final detection = ApiCardDetection.fromResponse(apiResponse);
 
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
-        title: Text(success ? 'Card Detected' : 'Detection Failed'),
+        title: const Text('Card Detected'),
         backgroundColor: Colors.transparent,
+        elevation: 0,
       ),
       body: Column(
         children: [
           Expanded(
-            child: success
-                ? CardResultPreview(
-                    imagePath: imagePath,
-                    detection: detection,
-                  )
-                : Padding(
-                    padding: const EdgeInsets.all(20.0),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        const Icon(
-                          Icons.error_outline,
-                          size: 80,
-                          color: Colors.red,
-                        ),
-                        const SizedBox(height: 16),
-                        Text(
-                          message,
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.white,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
+            child: CardResultPreview(
+              imagePath: imagePath,
+              detection: detection,
+              overlay: overlay,
+            ),
           ),
-          if (success && detection.isDetected)
-            _ApiMatchInfoPanel(detection: detection),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Colors.white70,
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+          _ApiMatchInfoPanel(detection: detection),
           Padding(
             padding: const EdgeInsets.all(24.0),
             child: ElevatedButton(
-              onPressed: () => Navigator.pop(context),
+              onPressed: () =>
+                  Navigator.popUntil(context, (route) => route.isFirst),
               style: ElevatedButton.styleFrom(
                 minimumSize: const Size(double.infinity, 50),
                 backgroundColor: Colors.white,
@@ -2084,7 +2640,10 @@ class _ApiMatchInfoPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final cardName = detection.matchedCard ?? 'Unknown card';
+    final rawName = detection.matchedCard ?? 'Unknown card';
+    final cardName = rawName.contains('/')
+        ? rawName.split('/').last
+        : rawName;
     final score = detection.similarityScore;
     final margin = detection.margin;
 
@@ -2138,16 +2697,6 @@ class _ApiMatchInfoPanel extends StatelessWidget {
               ],
             ),
           ],
-          if (detection.hasGeometry) ...[
-            const SizedBox(height: 12),
-            const Row(
-              children: [
-                _LegendDot(color: Color(0xFF7B61FF), label: 'Outer box'),
-                SizedBox(width: 16),
-                _LegendDot(color: Color(0xFF3DDC84), label: 'Card corners'),
-              ],
-            ),
-          ],
         ],
       ),
     );
@@ -2179,41 +2728,17 @@ class _ApiMatchInfoPanel extends StatelessWidget {
   }
 }
 
-class _LegendDot extends StatelessWidget {
-  final Color color;
-  final String label;
-
-  const _LegendDot({required this.color, required this.label});
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: 10,
-          height: 10,
-          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-        ),
-        const SizedBox(width: 6),
-        Text(
-          label,
-          style: const TextStyle(color: Colors.white70, fontSize: 12),
-        ),
-      ],
-    );
-  }
-}
-
-/// Shows uploaded image with API outer box + corner overlay (image pixel space).
+/// Final card image with preview-style guide boxes (read-only).
 class CardResultPreview extends StatelessWidget {
   final String imagePath;
   final ApiCardDetection detection;
+  final CardOverlaySnapshot? overlay;
 
   const CardResultPreview({
     super.key,
     required this.imagePath,
     required this.detection,
+    this.overlay,
   });
 
   @override
@@ -2226,60 +2751,54 @@ class CardResultPreview extends StatelessWidget {
         }
 
         final imageSize = snapshot.data!;
+        final baseOverlay = overlay ??
+            (detection.hasGeometry
+                ? CardOverlaySnapshot.fromApi(detection, imageSize)
+                : _defaultOverlay(imageSize));
+        final snapshotOverlay = baseOverlay.forResultDisplay();
 
-        return SingleChildScrollView(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            children: [
-              if (detection.annotatedImageUrl != null) ...[
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
-                  child: Image.network(
-                    detection.annotatedImageUrl!,
-                    fit: BoxFit.contain,
-                    loadingBuilder: (_, child, progress) {
-                      if (progress == null) return child;
-                      return const SizedBox(
-                        height: 120,
-                        child: Center(child: CircularProgressIndicator()),
-                      );
-                    },
-                    errorBuilder: (_, __, ___) => const SizedBox.shrink(),
-                  ),
-                ),
-                const SizedBox(height: 12),
-              ],
-              Center(
-                child: FittedBox(
-                  fit: BoxFit.contain,
-                  child: SizedBox(
-                    width: imageSize.width,
-                    height: imageSize.height,
-                    child: Stack(
-                      clipBehavior: Clip.none,
-                      children: [
-                        Image.file(
-                          File(imagePath),
-                          width: imageSize.width,
-                          height: imageSize.height,
-                          fit: BoxFit.fill,
-                        ),
-                        if (detection.hasGeometry)
-                          CustomPaint(
-                            size: imageSize,
-                            painter: ApiDetectionOverlayPainter(
-                              detection: detection,
-                            ),
-                          ),
-                      ],
+        return Center(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: FittedBox(
+              fit: BoxFit.contain,
+              child: SizedBox(
+                width: imageSize.width,
+                height: imageSize.height,
+                child: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    Image.file(
+                      File(imagePath),
+                      width: imageSize.width,
+                      height: imageSize.height,
+                      fit: BoxFit.fill,
                     ),
-                  ),
+                    Positioned.fill(
+                      child: CustomPaint(
+                        painter: GuideBoxesPainter(
+                          coordinateSize: snapshotOverlay.coordinateSize,
+                          outerGuideRect: snapshotOverlay.outerGuideRect,
+                          innerGuideRect: snapshotOverlay.innerGuideRect,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
-            ],
+            ),
           ),
         );
       },
+    );
+  }
+
+  CardOverlaySnapshot _defaultOverlay(Size imageSize) {
+    final outer = Rect.fromLTWH(0, 0, imageSize.width, imageSize.height);
+    return CardOverlaySnapshot(
+      coordinateSize: imageSize,
+      outerGuideRect: outer,
+      innerGuideRect: CardOverlaySnapshot.innerRectFromOuter(outer, imageSize),
     );
   }
 

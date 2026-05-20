@@ -6,20 +6,117 @@ import 'package:flutter/material.dart';
 import 'package:image/image.dart' as img;
 import 'package:opencv_dart/opencv.dart' as cv;
 
+/// Per-corner x/y alignment and angle deviation from a perfect rectangle.
+class CardCornerValidation {
+  final bool isValid;
+  final double maxAxisDefectPx;
+  final double maxAngleDefectDeg;
+  final List<double> axisDefectsPx;
+  final List<double> angleDefectsDeg;
+
+  const CardCornerValidation({
+    required this.isValid,
+    required this.maxAxisDefectPx,
+    required this.maxAngleDefectDeg,
+    this.axisDefectsPx = const [],
+    this.angleDefectsDeg = const [],
+  });
+
+  String get displayMessage {
+    if (isValid) {
+      return 'Corners OK (max ${maxAxisDefectPx.toStringAsFixed(1)}px, '
+          '${maxAngleDefectDeg.toStringAsFixed(1)}°)';
+    }
+    return 'Corner defect too high — max allowed ${CardCornerValidator.maxDefect}px / '
+        '${CardCornerValidator.maxDefect}°. '
+        'Got ${maxAxisDefectPx.toStringAsFixed(1)}px and '
+        '${maxAngleDefectDeg.toStringAsFixed(1)}°. Reposition and scan again.';
+  }
+}
+
+/// Validates OpenCV quad corners: all x/y edge defects and angles must be ≤ [maxDefect].
+class CardCornerValidator {
+  static const double maxDefect = 30.0;
+
+  /// Corners must be ordered TL, TR, BR, BL.
+  static CardCornerValidation validate(
+    List<Offset> corners, {
+    double maxAllowed = maxDefect,
+  }) {
+    if (corners.length != 4) {
+      return const CardCornerValidation(
+        isValid: false,
+        maxAxisDefectPx: double.infinity,
+        maxAngleDefectDeg: double.infinity,
+      );
+    }
+
+    final tl = corners[0];
+    final tr = corners[1];
+    final br = corners[2];
+    final bl = corners[3];
+
+    final axisDefectsPx = <double>[
+      (tl.dy - tr.dy).abs(),
+      (bl.dy - br.dy).abs(),
+      (tl.dx - bl.dx).abs(),
+      (tr.dx - br.dx).abs(),
+    ];
+
+    final angleDefectsDeg = <double>[
+      _angleDefectAt(bl, tl, tr),
+      _angleDefectAt(tl, tr, br),
+      _angleDefectAt(tr, br, bl),
+      _angleDefectAt(br, bl, tl),
+    ];
+
+    final maxAxis = axisDefectsPx.reduce(math.max);
+    final maxAngle = angleDefectsDeg.reduce(math.max);
+    final isValid = maxAxis <= maxAllowed && maxAngle <= maxAllowed;
+
+    return CardCornerValidation(
+      isValid: isValid,
+      maxAxisDefectPx: maxAxis,
+      maxAngleDefectDeg: maxAngle,
+      axisDefectsPx: axisDefectsPx,
+      angleDefectsDeg: angleDefectsDeg,
+    );
+  }
+
+  static double _angleDefectAt(Offset a, Offset b, Offset c) {
+    final v1 = Offset(a.dx - b.dx, a.dy - b.dy);
+    final v2 = Offset(c.dx - b.dx, c.dy - b.dy);
+    final mag1 = v1.distance;
+    final mag2 = v2.distance;
+    if (mag1 < 1e-6 || mag2 < 1e-6) return 90.0;
+    final cos = ((v1.dx * v2.dx + v1.dy * v2.dy) / (mag1 * mag2)).clamp(
+      -1.0,
+      1.0,
+    );
+    final degrees = math.acos(cos) * 180 / math.pi;
+    return (degrees - 90).abs();
+  }
+}
+
 /// Result of OpenCV card corner / bounding-box detection in image pixel space.
 class CardCornerDetectionResult {
   final bool success;
   final List<Offset> corners;
   final Rect outerBoundingBox;
   final String? errorMessage;
+  final CardCornerValidation? cornerValidation;
 
   const CardCornerDetectionResult({
     required this.success,
     this.corners = const [],
     this.outerBoundingBox = Rect.zero,
     this.errorMessage,
+    this.cornerValidation,
   });
+
+  bool get cornersValid => cornerValidation?.isValid ?? false;
 }
+
 
 /// Detects a playing-card-like quadrilateral using OpenCV contours.
 class CardCornerDetector {
@@ -166,10 +263,22 @@ class CardCornerDetector {
         (maxY + outerPadding).clamp(0.0, imageHeight),
       );
 
+      final validation = CardCornerValidator.validate(corners);
+      if (!validation.isValid) {
+        return CardCornerDetectionResult(
+          success: false,
+          corners: corners,
+          outerBoundingBox: outer,
+          cornerValidation: validation,
+          errorMessage: validation.displayMessage,
+        );
+      }
+
       return CardCornerDetectionResult(
         success: true,
         corners: corners,
         outerBoundingBox: outer,
+        cornerValidation: validation,
       );
     } catch (e) {
       return CardCornerDetectionResult(
